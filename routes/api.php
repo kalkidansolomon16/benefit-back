@@ -1,6 +1,9 @@
 <?php
 
+use App\Http\Controllers\AdminBillingController;
+use App\Http\Controllers\AdminPaymentMethodController;
 use App\Http\Controllers\AppointmentController;
+use App\Http\Controllers\CompanyBillingController;
 use App\Http\Controllers\EmployeePortalController;
 use App\Http\Controllers\HRController;
 use App\Http\Controllers\PartnerApplicationController;
@@ -59,6 +62,7 @@ Route::prefix('v1')->group(function () {
         Route::apiResource('companies', CompanyController::class);
         Route::patch('companies/{company}/toggle-active',      [CompanyController::class, 'toggleActive']);
         Route::patch('companies/{company}/license-status',     [CompanyController::class, 'updateLicenseStatus']);
+        Route::post('companies/{company}/deactivate',          [AdminBillingController::class, 'deactivateCompany']);
 
         // Employees
         Route::apiResource('employees', EmployeeController::class);
@@ -125,6 +129,40 @@ Route::prefix('v1')->group(function () {
             Route::post('employees',                          [HRController::class, 'registerEmployee']);
             Route::post('employees/{employee}/approve',       [HRController::class, 'approveEmployee']);
             Route::post('employees/{employee}/reject',        [HRController::class, 'rejectEmployee']);
+
+            // Billing (company-side)
+            Route::get('billing/invoices',                                      [CompanyBillingController::class, 'index']);
+            Route::get('billing/invoices/{billingInvoice}',                     [CompanyBillingController::class, 'show']);
+            Route::get('billing/payment-methods',                               [CompanyBillingController::class, 'paymentMethods']);
+            Route::post('billing/invoices/{billingInvoice}/pay',                [CompanyBillingController::class, 'submitPayment']);
+            Route::post('billing/invoices/{billingInvoice}/negotiate',          [CompanyBillingController::class, 'submitNegotiation']);
+        });
+
+        // ── Admin billing ──────────────────────────────────────────
+        Route::prefix('admin/billing')->group(function () {
+            // Invoices
+            Route::get('invoices',                                      [AdminBillingController::class, 'index']);
+            Route::post('invoices/generate',                            [AdminBillingController::class, 'generate']);
+            Route::get('invoices/{billingInvoice}',                     [AdminBillingController::class, 'show']);
+            Route::post('invoices/{billingInvoice}/send',               [AdminBillingController::class, 'send']);
+            Route::delete('invoices/{billingInvoice}',                  [AdminBillingController::class, 'destroy']);
+
+            // Payments / receipts
+            Route::get('pending-payments',                              [AdminBillingController::class, 'pendingPayments']);
+            Route::post('payments/{billingPayment}/verify',             [AdminBillingController::class, 'verifyPayment']);
+            Route::post('payments/{billingPayment}/reject',             [AdminBillingController::class, 'rejectPayment']);
+
+            // Negotiations
+            Route::get('negotiations',                                          [AdminBillingController::class, 'pendingNegotiations']);
+            Route::post('negotiations/{billingNegotiation}/approve',            [AdminBillingController::class, 'approveNegotiation']);
+            Route::post('negotiations/{billingNegotiation}/reject',             [AdminBillingController::class, 'rejectNegotiation']);
+
+            // Payment methods management
+            Route::get('payment-methods',                               [AdminPaymentMethodController::class, 'index']);
+            Route::post('payment-methods',                              [AdminPaymentMethodController::class, 'store']);
+            Route::put('payment-methods/{paymentMethod}',               [AdminPaymentMethodController::class, 'update']);
+            Route::delete('payment-methods/{paymentMethod}',            [AdminPaymentMethodController::class, 'destroy']);
+            Route::patch('payment-methods/{paymentMethod}/toggle',      [AdminPaymentMethodController::class, 'toggleActive']);
         });
     });
 });
