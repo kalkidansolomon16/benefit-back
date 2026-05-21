@@ -171,6 +171,7 @@ class HRController extends Controller
             'is_enrolled'         => true,
             'enrolled_at'         => now(),
             'level'               => $level,
+            'payment_status'      => 'unpaid',   // awaiting company invoice payment
         ]);
 
         // Activate the user account so they can log in

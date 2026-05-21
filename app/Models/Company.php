@@ -17,7 +17,7 @@ class Company extends Model
         'contact_phone', 'address', 'city', 'tier', 'employee_count',
         'logo_path', 'tin_number', 'is_active', 'contract_start', 'contract_end',
         'business_license_path', 'business_license_status',
-        'preferred_payment_method',
+        'preferred_payment_method', 'company_status', 'suspension_reason',
     ];
 
     protected $casts = [
@@ -53,6 +53,11 @@ class Company extends Model
     public function invoices(): HasMany
     {
         return $this->hasMany(Invoice::class);
+    }
+
+    public function billingInvoices(): HasMany
+    {
+        return $this->hasMany(BillingInvoice::class);
     }
 
     public function isContractActive(): bool
