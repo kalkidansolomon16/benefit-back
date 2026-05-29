@@ -9,6 +9,7 @@ use App\Models\Company;
 use App\Models\Employee;
 use App\Models\MembershipPlan;
 use App\Models\User;
+use App\Services\MembershipService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
@@ -203,14 +204,20 @@ class AdminBillingController extends Controller
                 'paid_at' => now(),
             ]);
 
-            // Mark all enrolled employees of this company as paid
-            Employee::where('company_id', $billingPayment->company_id)
-                ->where('is_enrolled', true)
-                ->where('registration_status', 'approved')
-                ->update(['payment_status' => 'paid']);
+            // Provision gym memberships (payment_status = 'paid') for all
+            // enrolled + approved employees of this company.
+            // This is the ONLY place where memberships are created — never at
+            // employee approval time, always at invoice-payment verification.
+            $result = MembershipService::provisionForCompany($billingPayment->company_id);
 
             return response()->json([
-                'message' => 'Payment verified. All company employees are now marked as paid.',
+                'message' => sprintf(
+                    'Payment verified. %d employee(s) are now marked as paid and %d gym membership(s) have been activated.',
+                    $result['employees'],
+                    $result['memberships']
+                ),
+                'employees_updated'   => $result['employees'],
+                'memberships_created' => $result['memberships'],
             ]);
         });
     }
