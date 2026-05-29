@@ -18,12 +18,19 @@ class Employee extends Model
         'job_title', 'level', 'department', 'branch',
         'request_note', 'registration_status', 'payment_status',
         'is_enrolled', 'enrolled_at',
+        'banned_until', 'ban_reason',
     ];
 
     protected $casts = [
-        'is_enrolled' => 'boolean',
-        'enrolled_at' => 'datetime',
+        'is_enrolled'  => 'boolean',
+        'enrolled_at'  => 'datetime',
+        'banned_until' => 'datetime',
     ];
+
+    public function getIsBannedAttribute(): bool
+    {
+        return $this->banned_until !== null && $this->banned_until->isFuture();
+    }
 
     public function user(): BelongsTo
     {

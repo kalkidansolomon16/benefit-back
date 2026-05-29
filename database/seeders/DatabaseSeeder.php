@@ -13,6 +13,9 @@ class DatabaseSeeder extends Seeder
         // Seed plans first
         $this->call(MembershipPlanSeeder::class);
 
+        // Seed permissions + role defaults
+        $this->call(PermissionsSeeder::class);
+
         // Create super admin
         User::firstOrCreate(
             ['email' => 'admin@fitaccess.com'],

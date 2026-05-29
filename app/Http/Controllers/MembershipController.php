@@ -4,6 +4,7 @@ namespace App\Http\Controllers;
 
 use App\Http\Requests\StoreMembershipRequest;
 use App\Http\Resources\MembershipResource;
+use App\Models\AuditLog;
 use App\Models\Membership;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
@@ -14,6 +15,7 @@ class MembershipController extends Controller
     public function index(Request $request): AnonymousResourceCollection
     {
         $memberships = Membership::with(['employee.user', 'gym', 'plan'])
+            ->whereHas('employee', fn($q) => $q->where('payment_status', 'paid'))
             ->when($request->status, fn($q) => $q->where('status', $request->status))
             ->when($request->gym_id, fn($q) => $q->where('gym_id', $request->gym_id))
             ->when($request->employee_id, fn($q) => $q->where('employee_id', $request->employee_id))
@@ -29,6 +31,7 @@ class MembershipController extends Controller
         // Increment gym current_members
         $membership->gym->increment('current_members');
         $membership->load(['employee', 'gym', 'plan']);
+        AuditLog::record('created', $membership);
         return response()->json(new MembershipResource($membership), 201);
     }
 
@@ -46,18 +49,21 @@ class MembershipController extends Controller
             'suspension_reason'  => $request->reason,
             'suspended_at'       => now(),
         ]);
+        AuditLog::record('updated', $membership, ['status' => 'active'], ['status' => 'suspended']);
         return response()->json(['message' => 'Membership suspended.', 'membership' => new MembershipResource($membership)]);
     }
 
     public function reinstate(Membership $membership): JsonResponse
     {
         $membership->update(['status' => 'active', 'suspension_reason' => null, 'suspended_at' => null]);
+        AuditLog::record('updated', $membership, ['status' => 'suspended'], ['status' => 'active']);
         return response()->json(['message' => 'Membership reinstated.']);
     }
 
     public function destroy(Membership $membership): JsonResponse
     {
         $membership->gym->decrement('current_members');
+        AuditLog::record('deleted', $membership);
         $membership->delete();
         return response()->json(['message' => 'Membership cancelled.']);
     }

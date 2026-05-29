@@ -41,8 +41,10 @@ class AuthController extends Controller
         $token = $user->createToken('fitaccess-token', [$user->role])->plainTextToken;
 
         return response()->json([
-            'user'  => new UserResource($user),
-            'token' => $token,
+            'user'               => new UserResource($user),
+            'token'              => $token,
+            'must_reset_password'=> $user->must_reset_password,
+            'permissions'        => $user->effectivePermissions(),
         ]);
     }
 
@@ -338,5 +340,95 @@ class AuthController extends Controller
         $user->update(['password' => Hash::make($request->new_password)]);
 
         return response()->json(['message' => 'Password changed successfully.']);
+    }
+
+    /**
+     * Forced first-login password reset.
+     * User must already be authenticated. Clears the must_reset_password flag.
+     */
+    public function firstLoginReset(Request $request): JsonResponse
+    {
+        $user = $request->user();
+
+        if (!$user->must_reset_password) {
+            return response()->json(['message' => 'Password reset is not required.'], 422);
+        }
+
+        $request->validate([
+            'password' => 'required|string|min:8|confirmed',
+        ]);
+
+        $user->update([
+            'password'            => Hash::make($request->password),
+            'must_reset_password' => false,
+        ]);
+
+        return response()->json([
+            'message'     => 'Password updated successfully.',
+            'permissions' => $user->fresh()->effectivePermissions(),
+        ]);
+    }
+
+    /**
+     * Forgot-password: generate a reset token and return it.
+     * In production you would email it; here we return it directly so
+     * the flow works without an SMTP server.
+     */
+    public function forgotPassword(Request $request): JsonResponse
+    {
+        $request->validate(['email' => 'required|email']);
+
+        $user = User::where('email', $request->email)->where('is_active', true)->first();
+
+        if (!$user) {
+            // Deliberate vague response to avoid user enumeration
+            return response()->json(['message' => 'If this email is registered, a reset code has been sent.']);
+        }
+
+        $token   = strtoupper(substr(str_shuffle('ABCDEFGHJKLMNPQRSTUVWXYZ23456789'), 0, 8));
+        $expires = now()->addHour();
+
+        $user->update([
+            'password_reset_token'      => Hash::make($token),
+            'password_reset_expires_at' => $expires,
+        ]);
+
+        // TODO: send email with $token. For now return it in response.
+        return response()->json([
+            'message' => 'Reset code generated.',
+            'token'   => $token,       // remove this in production; email instead
+            'expires' => $expires->toDateTimeString(),
+        ]);
+    }
+
+    /**
+     * Reset password using email + token.
+     */
+    public function resetPassword(Request $request): JsonResponse
+    {
+        $request->validate([
+            'email'    => 'required|email',
+            'token'    => 'required|string',
+            'password' => 'required|string|min:8|confirmed',
+        ]);
+
+        $user = User::where('email', $request->email)->first();
+
+        if (!$user
+            || !$user->password_reset_token
+            || !Hash::check($request->token, $user->password_reset_token)
+            || now()->gt($user->password_reset_expires_at)
+        ) {
+            return response()->json(['message' => 'Invalid or expired reset code.'], 422);
+        }
+
+        $user->update([
+            'password'                  => Hash::make($request->password),
+            'must_reset_password'       => false,
+            'password_reset_token'      => null,
+            'password_reset_expires_at' => null,
+        ]);
+
+        return response()->json(['message' => 'Password has been reset. You can now log in.']);
     }
 }
