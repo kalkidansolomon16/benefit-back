@@ -1,6 +1,7 @@
 <?php
 
 use App\Http\Controllers\AdminBillingController;
+use App\Http\Controllers\AdminNotificationController;
 use App\Http\Controllers\AdminPaymentMethodController;
 use App\Http\Controllers\AdminUserController;
 use App\Http\Controllers\AppointmentController;
@@ -41,6 +42,7 @@ Route::prefix('v1')->group(function () {
     Route::post('auth/register/employee',  [AuthController::class, 'registerEmployee']);
     Route::post('auth/register/partner',   [AuthController::class, 'registerPartner']);
     Route::get('public/companies',         [CompanyController::class, 'publicList']);
+    Route::get('public/plans',             [MembershipPlanController::class, 'index']);
 
     // ── Protected ───────────────────────────────────────────────────
     Route::middleware('auth:sanctum')->group(function () {
@@ -108,6 +110,12 @@ Route::prefix('v1')->group(function () {
         });
 
         // Dashboard
+        // Admin Notifications
+        Route::get( 'notifications',                                  [AdminNotificationController::class, 'index']);
+        Route::get( 'notifications/unread-count',                     [AdminNotificationController::class, 'unreadCount']);
+        Route::post('notifications/read-all',                         [AdminNotificationController::class, 'markAllRead']);
+        Route::post('notifications/{adminNotification}/read',         [AdminNotificationController::class, 'markRead']);
+
         Route::prefix('dashboard')->group(function () {
             Route::get('stats',                [DashboardController::class, 'stats']);
             Route::get('recent-checkins',      [DashboardController::class, 'recentCheckins']);
@@ -129,10 +137,14 @@ Route::prefix('v1')->group(function () {
         Route::post('companies/{company}/deactivate',          [AdminBillingController::class, 'deactivateCompany']);
 
         // Employees
+        Route::get( 'employees/pending-admin-approval',    [EmployeeController::class, 'pendingAdminApproval']);
+        Route::post('employees/{employee}/admin-approve',  [EmployeeController::class, 'adminApprove']);
+        Route::post('employees/{employee}/admin-reject',   [EmployeeController::class, 'adminReject']);
         Route::apiResource('employees', EmployeeController::class);
-        Route::post('employees/{employee}/enroll', [EmployeeController::class, 'enroll']);
-        Route::post('employees/{employee}/ban',    [EmployeeController::class, 'ban']);
-        Route::post('employees/{employee}/unban',  [EmployeeController::class, 'unban']);
+        Route::post('employees/{employee}/enroll',        [EmployeeController::class, 'enroll']);
+        Route::post('employees/{employee}/toggle-active', [EmployeeController::class, 'toggleActive']);
+        Route::post('employees/{employee}/ban',           [EmployeeController::class, 'ban']);
+        Route::post('employees/{employee}/unban',         [EmployeeController::class, 'unban']);
 
         // Gyms
         Route::apiResource('gyms', GymController::class);
