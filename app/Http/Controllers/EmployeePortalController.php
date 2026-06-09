@@ -42,31 +42,28 @@ class EmployeePortalController extends Controller
 
         $planKey  = $myPlan?->tier  ?? $fallbackTier;
         $planName = $myPlan?->name  ?? ucfirst(str_replace('_', ' ', $planKey));
-        $planFee  = (float) ($myPlan?->monthly_fee_etb ?? 0);
 
-        // Accessible tiers: all active plans whose fee ≤ employee's plan fee
-        $allActivePlans = MembershipPlan::where('is_active', true)->orderBy('monthly_fee_etb')->get();
+        // Tier hierarchy: higher rank includes all lower tiers
+        // Only standard tiers are included — custom/test plans are excluded from gym access
+        $tierRank = ['basic' => 0, 'basic_plus' => 1, 'premium' => 2, 'platinum' => 3];
+        $myRank   = $tierRank[$planKey] ?? 0;
 
-        $accessibleTiers = $allActivePlans
-            ->filter(fn($p) => (float)$p->monthly_fee_etb <= $planFee)
-            ->pluck('tier')
-            ->push($planKey)          // always include own tier
-            ->unique()
-            ->values()
-            ->toArray();
+        $accessibleTiers = array_keys(array_filter(
+            $tierRank,
+            fn($rank) => $rank <= $myRank
+        ));
 
-        // Fallback if no plans exist in DB yet
+        // Fallback for unrecognised tier keys
         if (empty($accessibleTiers)) {
-            $accessibleTiers = match($planKey) {
-                'platinum'   => ['basic', 'basic_plus', 'premium', 'platinum'],
-                'basic_plus' => ['basic', 'basic_plus'],
-                default      => [$planKey],
-            };
+            $accessibleTiers = [$planKey];
         }
 
-        // Accessible plan names (for the frontend filter labels)
+        // Fetch active plans to build labels (only standard tiers)
+        $allActivePlans = MembershipPlan::where('is_active', true)->orderBy('monthly_fee_etb')->get();
+
+        // Accessible plan names (only the standard tiers that match)
         $accessiblePlanLabels = $allActivePlans
-            ->filter(fn($p) => in_array($p->tier, $accessibleTiers))
+            ->filter(fn($p) => in_array($p->tier, $accessibleTiers) && isset($tierRank[$p->tier]))
             ->mapWithKeys(fn($p) => [$p->tier => $p->name])
             ->toArray();
 

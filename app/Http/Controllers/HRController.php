@@ -2,6 +2,7 @@
 
 namespace App\Http\Controllers;
 
+use App\Models\AdminNotification;
 use App\Models\AuditLog;
 use App\Models\Company;
 use App\Models\Employee;
@@ -177,29 +178,48 @@ class HRController extends Controller
         if ($employee->company_id !== $company->id) abort(403);
 
         $request->validate([
-            'plan' => 'nullable|string|exists:membership_plans,tier',
+            'plan'               => 'nullable|string|exists:membership_plans,tier',
+            'payment_preference' => 'required|in:pay_now,pay_later',
         ]);
 
         $tier  = $request->plan ?? 'basic';
         $level = $this->packageToLevel($tier);
 
         $employee->update([
-            'registration_status' => 'approved',
+            'registration_status'   => 'approved',
+            'admin_approval_status' => 'pending',
+            'payment_preference'    => $request->payment_preference,
             'is_enrolled'         => true,
             'enrolled_at'         => now(),
             'level'               => $level,
             'payment_status'      => 'unpaid',   // memberships granted only after invoice is paid
         ]);
 
-        // Activate the user account so they can log in
-        $employee->user?->update(['is_active' => true]);
+        // If company chose Pay Now, create an admin notification to generate an invoice
+        if ($request->payment_preference === 'pay_now') {
+            AdminNotification::invoiceRequest(
+                $company->name,
+                $employee->user?->name ?? 'Unknown',
+                $employee->id,
+                $company->id
+            );
+        }
 
+        // User stays INACTIVE until admin gives final approval after payment review.
         // NOTE: memberships are NOT created here.
         // They will be auto-provisioned when the company's billing invoice is
         // verified/paid by the admin (see AdminBillingController::verifyPayment).
 
-        AuditLog::record('updated', $employee, ['registration_status' => 'pending'], ['registration_status' => 'approved']);
-        return response()->json(['message' => 'Employee approved and activated.', 'employee_id' => $employee->id]);
+        AuditLog::record('updated', $employee, ['registration_status' => 'pending'], [
+            'registration_status'   => 'approved',
+            'payment_preference'    => $request->payment_preference,
+            'admin_approval_status' => 'pending',
+        ]);
+        return response()->json([
+            'message'            => 'Employee approved by HR. Pending admin final approval.',
+            'employee_id'        => $employee->id,
+            'payment_preference' => $request->payment_preference,
+        ]);
     }
 
     public function rejectEmployee(Employee $employee): JsonResponse
@@ -322,7 +342,7 @@ class HRController extends Controller
                 'role'       => 'employee',
                 'phone'      => $request->phone,
                 'fan_number' => $request->fan_number,
-                'is_active'  => true,
+                'is_active'  => false,   // activated after admin final approval
             ]);
 
             $employee = Employee::create([

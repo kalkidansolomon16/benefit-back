@@ -15,12 +15,18 @@ class MembershipController extends Controller
     public function index(Request $request): AnonymousResourceCollection
     {
         $memberships = Membership::with(['employee.user', 'gym', 'plan'])
-            ->whereHas('employee', fn($q) => $q->where('payment_status', 'paid'))
-            ->when($request->status, fn($q) => $q->where('status', $request->status))
-            ->when($request->gym_id, fn($q) => $q->where('gym_id', $request->gym_id))
+            ->when($request->status,      fn($q) => $q->where('status', $request->status))
+            ->when($request->gym_id,      fn($q) => $q->where('gym_id', $request->gym_id))
             ->when($request->employee_id, fn($q) => $q->where('employee_id', $request->employee_id))
+            ->when($request->plan_id,     fn($q) => $q->where('plan_id', $request->plan_id))
+            ->when($request->gym_tier,    fn($q) => $q->whereHas('gym', fn($g) => $g->where('tier', $request->gym_tier)))
+            ->when($request->company_id,  fn($q) => $q->whereHas('employee', fn($e) => $e->where('company_id', $request->company_id)))
+            ->when($request->search,      fn($q) => $q->whereHas('employee.user', fn($u) =>
+                $u->where('name', 'like', "%{$request->search}%")
+                  ->orWhere('email', 'like', "%{$request->search}%")
+            ))
             ->latest()
-            ->paginate(15);
+            ->paginate(20);
 
         return MembershipResource::collection($memberships);
     }
