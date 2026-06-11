@@ -6,6 +6,7 @@ use App\Http\Requests\StoreEmployeeRequest;
 use App\Http\Resources\EmployeeResource;
 use App\Models\AuditLog;
 use App\Models\Employee;
+use App\Services\TelegramService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Http\Resources\Json\AnonymousResourceCollection;
@@ -28,7 +29,7 @@ class EmployeeController extends Controller
                 ->orWhere('fan_number', 'like', "%{$request->search}%")
             )
             ->latest()
-            ->paginate(15);
+            ->paginate(min((int) ($request->per_page ?? 15), 500));
 
         return EmployeeResource::collection($employees);
     }
@@ -181,6 +182,9 @@ class EmployeeController extends Controller
             'payment_status'        => $request->payment_status,
         ]);
 
+        // Telegram notification
+        app(TelegramService::class)->notifyUserApproved($employee->user, 'employee');
+
         return response()->json([
             'message' => 'Employee approved by admin. Account is now active.',
             'employee_id' => $employee->id,
@@ -201,6 +205,9 @@ class EmployeeController extends Controller
         AuditLog::record('updated', $employee, ['admin_approval_status' => 'pending'], [
             'admin_approval_status' => 'rejected',
         ]);
+
+        // Telegram notification
+        app(TelegramService::class)->notifyUserRejected($employee->user, 'employee', $request->reason ?? null);
 
         return response()->json(['message' => 'Employee rejected at admin stage.']);
     }

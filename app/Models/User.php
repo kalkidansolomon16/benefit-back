@@ -20,6 +20,7 @@ class User extends Authenticatable
         'fan_number', 'photo_path', 'phone', 'is_active',
         'must_reset_password', 'password_reset_token', 'password_reset_expires_at',
         'created_by', 'company_id', 'gym_id',
+        'telegram_chat_id', 'telegram_link_token', 'telegram_link_expires_at',
     ];
 
     protected $hidden = ['password', 'remember_token', 'password_reset_token'];
@@ -27,10 +28,11 @@ class User extends Authenticatable
     protected function casts(): array
     {
         return [
-            'password'                 => 'hashed',
-            'is_active'                => 'boolean',
-            'must_reset_password'      => 'boolean',
-            'password_reset_expires_at'=> 'datetime',
+            'password'                   => 'hashed',
+            'is_active'                  => 'boolean',
+            'must_reset_password'        => 'boolean',
+            'password_reset_expires_at'  => 'datetime',
+            'telegram_link_expires_at'   => 'datetime',
         ];
     }
 

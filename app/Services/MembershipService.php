@@ -110,6 +110,7 @@ class MembershipService
         $employees = Employee::where('company_id', $companyId)
             ->where('registration_status', 'approved')
             ->where('is_enrolled', true)
+            ->where('payment_status', 'unpaid')
             ->get();
 
         $totalMemberships = 0;

@@ -1,5 +1,7 @@
 <?php
 
+use App\Http\Controllers\TelegramController;
+use App\Http\Controllers\TelegramSettingsController;
 use App\Http\Controllers\AdminBillingController;
 use App\Http\Controllers\AdminNotificationController;
 use App\Http\Controllers\AdminPaymentMethodController;
@@ -18,6 +20,7 @@ use App\Http\Controllers\CompanyController;
 use App\Http\Controllers\DashboardController;
 use App\Http\Controllers\EmployeeController;
 use App\Http\Controllers\GymController;
+use App\Http\Controllers\GymUpgradeController;
 use App\Http\Controllers\InvoiceController;
 use App\Http\Controllers\MembershipController;
 use App\Http\Controllers\MembershipPlanController;
@@ -34,6 +37,9 @@ use Illuminate\Support\Facades\Route;
 
 Route::prefix('v1')->group(function () {
 
+    // ── Telegram webhook (public — Telegram must reach this) ─────────
+    Route::post('telegram/webhook',        [TelegramController::class, 'webhook']);
+
     // ── Auth & public ────────────────────────────────────────────────
     Route::post('auth/login',              [AuthController::class, 'login']);
     Route::post('auth/forgot-password',    [AuthController::class, 'forgotPassword']);
@@ -46,6 +52,13 @@ Route::prefix('v1')->group(function () {
 
     // ── Protected ───────────────────────────────────────────────────
     Route::middleware('auth:sanctum')->group(function () {
+
+        // ── Telegram user settings ────────────────────────────────────
+        Route::prefix('telegram')->group(function () {
+            Route::get('status',            [TelegramSettingsController::class, 'status']);
+            Route::post('generate-code',    [TelegramSettingsController::class, 'generateCode']);
+            Route::delete('unlink',         [TelegramSettingsController::class, 'unlink']);
+        });
 
         Route::post('auth/logout',             [AuthController::class, 'logout']);
         Route::get('auth/me',                  [AuthController::class, 'me']);
@@ -200,8 +213,11 @@ Route::prefix('v1')->group(function () {
 
         // ── Partner / Gym portal ───────────────────────────────────
         Route::prefix('partner')->group(function () {
-            Route::get('dashboard',          [PartnerPortalController::class, 'dashboard']);
-            Route::get('expected-visitors',  [CheckinController::class, 'expectedVisitors']);
+            Route::get('dashboard',                       [PartnerPortalController::class, 'dashboard']);
+            Route::get('expected-visitors',               [CheckinController::class, 'expectedVisitors']);
+            Route::put('profile',                         [GymUpgradeController::class, 'updateProfile']);
+            Route::post('upgrade-request',                [GymUpgradeController::class, 'submitRequest']);
+            Route::get('upgrade-requests',                [GymUpgradeController::class, 'myRequests']);
         });
 
         // ── Company HR portal ──────────────────────────────────────
@@ -248,6 +264,13 @@ Route::prefix('v1')->group(function () {
             Route::put('payment-methods/{paymentMethod}',               [AdminPaymentMethodController::class, 'update']);
             Route::delete('payment-methods/{paymentMethod}',            [AdminPaymentMethodController::class, 'destroy']);
             Route::patch('payment-methods/{paymentMethod}/toggle',      [AdminPaymentMethodController::class, 'toggleActive']);
+        });
+
+        // ── Admin gym upgrade requests ─────────────────────────────
+        Route::prefix('admin/gym-upgrades')->group(function () {
+            Route::get('/',                                    [GymUpgradeController::class, 'adminIndex']);
+            Route::post('{gymUpgradeRequest}/approve',         [GymUpgradeController::class, 'adminApprove']);
+            Route::post('{gymUpgradeRequest}/reject',          [GymUpgradeController::class, 'adminReject']);
         });
     });
 });

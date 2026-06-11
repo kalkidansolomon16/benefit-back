@@ -17,6 +17,7 @@ class Employee extends Model
         'user_id', 'company_id', 'fan_number', 'photo_path',
         'job_title', 'level', 'department', 'branch',
         'request_note', 'registration_status', 'payment_status',
+        'admin_approval_status', 'payment_preference',
         'is_enrolled', 'enrolled_at',
         'banned_until', 'ban_reason',
     ];
