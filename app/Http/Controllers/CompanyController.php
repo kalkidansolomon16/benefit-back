@@ -7,6 +7,7 @@ use App\Http\Resources\CompanyResource;
 use App\Models\AuditLog;
 use App\Models\Company;
 use App\Models\User;
+use App\Services\TelegramService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Http\Resources\Json\AnonymousResourceCollection;
@@ -221,6 +222,17 @@ class CompanyController extends Controller
         // Activate (or keep deactivated) the HR user so they can log in
         if ($isApproved) {
             $company->hrUser?->update(['is_active' => true]);
+        }
+
+        // Telegram notification to HR user
+        $hrUser = $company->hrUser;
+        if ($hrUser) {
+            $telegram = app(TelegramService::class);
+            if ($isApproved) {
+                $telegram->notifyUserApproved($hrUser, 'company');
+            } else {
+                $telegram->notifyUserRejected($hrUser, 'company', $request->reason ?? null);
+            }
         }
 
         AuditLog::record('updated', $company, ['business_license_status' => $company->getOriginal('business_license_status')], ['business_license_status' => $request->status]);

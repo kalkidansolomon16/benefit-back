@@ -8,6 +8,7 @@ use App\Models\Company;
 use App\Models\Employee;
 use App\Models\PartnerApplication;
 use App\Models\User;
+use App\Services\TelegramService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
@@ -35,7 +36,23 @@ class AuthController extends Controller
 
         if (!$user->is_active) {
             Auth::logout();
-            return response()->json(['message' => 'Account is deactivated.'], 403);
+
+            $isPending = match($user->role) {
+                'company_hr'  => Company::where('contact_email', $user->email)
+                                    ->where('business_license_status', 'pending')
+                                    ->exists(),
+                'employee'    => $user->employee?->registration_status === 'pending',
+                'gym_partner' => PartnerApplication::where('user_id', $user->id)
+                                    ->where('status', 'pending')
+                                    ->exists(),
+                default       => false,
+            };
+
+            $message = $isPending
+                ? 'Your account is pending approval. You will be notified once reviewed.'
+                : 'Account is deactivated.';
+
+            return response()->json(['message' => $message], 403);
         }
 
         $token = $user->createToken('fitaccess-token', [$user->role])->plainTextToken;
@@ -128,6 +145,9 @@ class AuthController extends Controller
                 // 3. Issue a Sanctum token
                 $token = $user->createToken('fitaccess-token')->plainTextToken;
 
+                // Notify admins via Telegram
+                app(TelegramService::class)->notifyAdminsNewCompany($company, $user);
+
                 return response()->json([
                     'message' => 'Registration submitted. Your account will be activated after licence review (2–3 business days).',
                     'user'    => new UserResource($user),
@@ -197,6 +217,9 @@ class AuthController extends Controller
                 'registration_status' => 'pending',
                 'is_enrolled'         => false,
             ]);
+
+            // Notify HR & admins via Telegram
+            app(TelegramService::class)->notifyHRNewEmployee($employee->load('user', 'company'));
 
             return response()->json([
                 'message' => 'Your application has been submitted! Your HR team will review and activate your account.',
@@ -290,6 +313,9 @@ class AuthController extends Controller
                     'amenities'               => $amenities,
                     'status'                  => 'pending',
                 ]);
+
+                // Notify admins via Telegram
+                app(TelegramService::class)->notifyAdminsNewPartner($partnerApplication);
 
                 return response()->json([
                     'message' => 'Partner application submitted! Our team will review it within 2–3 business days.',

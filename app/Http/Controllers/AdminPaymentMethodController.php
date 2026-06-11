@@ -16,6 +16,7 @@ class AdminPaymentMethodController extends Controller
     public function store(Request $request): JsonResponse
     {
         $validated = $request->validate([
+            'type'           => 'required|string|in:bank,telebirr,cbe_birr,mpesa,other',
             'bank_name'      => 'required|string|max:100',
             'account_name'   => 'required|string|max:150',
             'account_number' => 'required|string|max:50',
@@ -31,6 +32,7 @@ class AdminPaymentMethodController extends Controller
     public function update(Request $request, PaymentMethod $paymentMethod): JsonResponse
     {
         $validated = $request->validate([
+            'type'           => 'sometimes|required|string|in:bank,telebirr,cbe_birr,mpesa,other',
             'bank_name'      => 'sometimes|required|string|max:100',
             'account_name'   => 'sometimes|required|string|max:150',
             'account_number' => 'sometimes|required|string|max:50',
