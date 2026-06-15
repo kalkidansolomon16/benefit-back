@@ -1,6 +1,13 @@
 <?php
 
+use App\Http\Controllers\AdminBillingController;
+use App\Http\Controllers\AdminPaymentMethodController;
 use App\Http\Controllers\AppointmentController;
+use App\Http\Controllers\CompanyBillingController;
+use App\Http\Controllers\EmployeePortalController;
+use App\Http\Controllers\HRController;
+use App\Http\Controllers\PartnerApplicationController;
+use App\Http\Controllers\PartnerPortalController;
 use App\Http\Controllers\AuthController;
 use App\Http\Controllers\CheckinController;
 use App\Http\Controllers\CompanyController;
@@ -22,8 +29,65 @@ use Illuminate\Support\Facades\Route;
 
 Route::prefix('v1')->group(function () {
 
-    // ── Auth (public) ───────────────────────────────────────────────
-    Route::post('auth/login',  [AuthController::class, 'login']);
+    // ── Auth & public ────────────────────────────────────────────────
+    Route::post('auth/login',             [AuthController::class, 'login']);
+    Route::post('auth/register/company',  [AuthController::class, 'registerCompany']);
+    Route::post('auth/register/employee', [AuthController::class, 'registerEmployee']);
+    Route::post('auth/register/partner',  [AuthController::class, 'registerPartner']);
+    Route::get('public/companies',        [CompanyController::class, 'publicList']);
+    Route::post('auth/register/member', [\App\Http\Controllers\AuthController::class, 'registerMember']);
+
+    // Password reset
+    Route::post('auth/forgot-password', function (\Illuminate\Http\Request $request) {
+        $request->validate(['email' => 'required|email']);
+
+        $status = \Illuminate\Support\Facades\Password::sendResetLink(
+            $request->only('email')
+        );
+
+        return $status === \Illuminate\Support\Facades\Password::RESET_LINK_SENT
+            ? response()->json(['message' => 'Password reset link sent to your email.'])
+            : response()->json(['message' => 'We could not find a user with that email address.'], 422);
+    })->middleware('throttle:5,1');
+
+    Route::post('auth/reset-password', function (\Illuminate\Http\Request $request) {
+        $request->validate([
+            'token'    => 'required',
+            'email'    => 'required|email',
+            'password' => 'required|min:8|confirmed',
+        ]);
+
+        $status = \Illuminate\Support\Facades\Password::reset(
+            $request->only('email', 'password', 'password_confirmation', 'token'),
+            function ($user, $password) {
+                $user->forceFill([
+                    'password' => \Illuminate\Support\Facades\Hash::make($password),
+                ])->save();
+            }
+        );
+
+        return $status === \Illuminate\Support\Facades\Password::PASSWORD_RESET
+            ? response()->json(['message' => 'Password reset successfully.'])
+            : response()->json(['message' => 'Invalid or expired reset token.'], 422);
+    })->middleware('throttle:5,1');
+
+    Route::get('auth/reset-password-redirect', function (\Illuminate\Http\Request $request) {
+        $token = $request->query('token');
+        $email = $request->query('email');
+
+        // Return an HTML page with a button that opens the app
+        return response('<html><body style="font-family:sans-serif;text-align:center;padding:40px">
+        <h2>Reset Your FitAccess Password</h2>
+        <p>Click the button below to open the FitAccess app and reset your password.</p>
+        <a href="fitaccess://reset-password?token=' . $token . '&email=' . urlencode($email) . '" 
+           style="background:#4CD964;color:white;padding:14px 28px;border-radius:8px;text-decoration:none;font-weight:bold;display:inline-block;margin-top:20px">
+           Open FitAccess App
+        </a>
+        <p style="color:#999;font-size:12px;margin-top:20px">If the button does not work, copy this token into the app manually:<br><strong>' . $token . '</strong></p>
+    </body></html>', 200, ['Content-Type' => 'text/html']);
+    });
+
+
 
     // ── Protected ───────────────────────────────────────────────────
     Route::middleware('auth:sanctum')->group(function () {
@@ -31,17 +95,60 @@ Route::prefix('v1')->group(function () {
         Route::post('auth/logout',          [AuthController::class, 'logout']);
         Route::get('auth/me',               [AuthController::class, 'me']);
         Route::post('auth/change-password', [AuthController::class, 'changePassword']);
+        // ── MOBILE — Member (User App) ────────────────────────────────────────
+        Route::prefix('mobile')->group(function () {
+            Route::get('dashboard',              [\App\Http\Controllers\MobileController::class, 'dashboard']);
+            Route::get('qr-token',               [\App\Http\Controllers\MobileController::class, 'qrToken']);
+            Route::get('profile',                [\App\Http\Controllers\MobileController::class, 'profile']);
+            Route::patch('profile',              [\App\Http\Controllers\MobileController::class, 'updateProfile']);
+            Route::post('profile/photo',         [\App\Http\Controllers\MobileController::class, 'uploadPhoto']);
+            Route::get('checkins',               [\App\Http\Controllers\MobileController::class, 'checkins']);
+            Route::get('packages',               [\App\Http\Controllers\MobileController::class, 'packages']);
+            Route::get('subscription',           [\App\Http\Controllers\MobileController::class, 'subscription']);
+            Route::post('subscription',          [\App\Http\Controllers\MobileController::class, 'createSubscription']);
+            Route::post('subscription/cancel',   [\App\Http\Controllers\MobileController::class, 'cancelSubscription']);
+            Route::get('gyms',                   [\App\Http\Controllers\MobileController::class, 'gyms']);
+            Route::get('gyms/{gym}',             [\App\Http\Controllers\MobileController::class, 'gymDetail']);
+            Route::get('notifications',          [\App\Http\Controllers\MobileController::class, 'notifications']);
+            Route::patch('notifications/read-all', [\App\Http\Controllers\MobileController::class, 'markAllNotificationsRead']);
+            Route::patch('notifications/{notification}/read', [\App\Http\Controllers\MobileController::class, 'markNotificationRead']);
+        });
+
+        // ── PARTNER MOBILE — Gym Staff / Owner (Partner App) ─────────────────
+        Route::prefix('partner')->group(function () {
+            Route::get('me',                     [\App\Http\Controllers\PartnerMobileController::class, 'me']);
+            Route::post('scan',                  [\App\Http\Controllers\PartnerMobileController::class, 'scan']);
+            Route::get('visits/today',           [\App\Http\Controllers\PartnerMobileController::class, 'visitsToday']);
+            Route::get('visits/monthly',         [\App\Http\Controllers\PartnerMobileController::class, 'visitsMonthly']);
+            Route::get('reports',                [\App\Http\Controllers\PartnerMobileController::class, 'reports']);
+            Route::get('financials',             [\App\Http\Controllers\PartnerMobileController::class, 'financials']);
+            Route::get('staff',                  [\App\Http\Controllers\PartnerMobileController::class, 'staffList']);
+            Route::post('staff/invite',          [\App\Http\Controllers\PartnerMobileController::class, 'inviteStaff']);
+            Route::delete('staff/{gymStaff}',    [\App\Http\Controllers\PartnerMobileController::class, 'removeStaff']);
+            Route::patch('facility',             [\App\Http\Controllers\PartnerMobileController::class, 'updateFacility']);
+            Route::post('facility/photo',        [\App\Http\Controllers\PartnerMobileController::class, 'uploadFacilityPhoto']);
+        });
 
         // Dashboard
         Route::prefix('dashboard')->group(function () {
-            Route::get('stats',           [DashboardController::class, 'stats']);
-            Route::get('recent-checkins', [DashboardController::class, 'recentCheckins']);
-            Route::get('top-gyms',        [DashboardController::class, 'topGyms']);
+            Route::get('stats',                [DashboardController::class, 'stats']);
+            Route::get('recent-checkins',      [DashboardController::class, 'recentCheckins']);
+            Route::get('top-gyms',             [DashboardController::class, 'topGyms']);
+            Route::get('package-distribution',  [DashboardController::class, 'packageDistribution']);
+            Route::get('revenue-by-company',    [DashboardController::class, 'revenueByCompany']);
+            Route::get('checkin-trend',         [DashboardController::class, 'checkinTrend']);
+            Route::get('activity-log',          [DashboardController::class, 'activityLog']);
+            Route::get('gym-stats',             [DashboardController::class, 'gymStats']);
+            Route::get('recent-registrations',  [DashboardController::class, 'recentRegistrations']);
+            Route::get('attendance-report',     [DashboardController::class, 'attendanceReport']);
         });
 
         // Companies
+        Route::post('companies/admin-create', [CompanyController::class, 'adminCreate']);
         Route::apiResource('companies', CompanyController::class);
-        Route::patch('companies/{company}/toggle-active', [CompanyController::class, 'toggleActive']);
+        Route::patch('companies/{company}/toggle-active',      [CompanyController::class, 'toggleActive']);
+        Route::patch('companies/{company}/license-status',     [CompanyController::class, 'updateLicenseStatus']);
+        Route::post('companies/{company}/deactivate',          [AdminBillingController::class, 'deactivateCompany']);
 
         // Employees
         Route::apiResource('employees', EmployeeController::class);
@@ -50,8 +157,14 @@ Route::prefix('v1')->group(function () {
         // Gyms
         Route::apiResource('gyms', GymController::class);
 
+        // Partner Applications
+        Route::get('partner-applications',                              [PartnerApplicationController::class, 'index']);
+        Route::post('partner-applications/{partnerApplication}/approve', [PartnerApplicationController::class, 'approve']);
+        Route::post('partner-applications/{partnerApplication}/reject', [PartnerApplicationController::class, 'reject']);
+
         // Membership Plans
         Route::apiResource('membership-plans', MembershipPlanController::class);
+        Route::patch('membership-plans/{membershipPlan}/toggle-active', [MembershipPlanController::class, 'toggleActive']);
 
         // Memberships
         Route::apiResource('memberships', MembershipController::class)->except(['update']);
@@ -83,5 +196,59 @@ Route::prefix('v1')->group(function () {
         // Appointments
         Route::apiResource('appointments', AppointmentController::class);
         Route::patch('appointments/{appointment}/status', [AppointmentController::class, 'updateStatus']);
+
+        // ── Employee portal ────────────────────────────────────────
+        Route::prefix('employee')->group(function () {
+            Route::get('dashboard', [EmployeePortalController::class, 'dashboard']);
+        });
+
+        // ── Partner / Gym portal ───────────────────────────────────
+        Route::prefix('partner')->group(function () {
+            Route::get('dashboard', [PartnerPortalController::class, 'dashboard']);
+        });
+
+        // ── Company HR portal ──────────────────────────────────────
+        Route::prefix('hr')->group(function () {
+            Route::get('my-company',                          [HRController::class, 'myCompany']);
+            Route::get('dashboard',                           [HRController::class, 'dashboard']);
+            Route::get('employees',                           [HRController::class, 'employees']);
+            Route::post('employees',                          [HRController::class, 'registerEmployee']);
+            Route::post('employees/{employee}/approve',       [HRController::class, 'approveEmployee']);
+            Route::post('employees/{employee}/reject',        [HRController::class, 'rejectEmployee']);
+
+            // Billing (company-side)
+            Route::get('billing/invoices',                                      [CompanyBillingController::class, 'index']);
+            Route::get('billing/invoices/{billingInvoice}',                     [CompanyBillingController::class, 'show']);
+            Route::get('billing/payment-methods',                               [CompanyBillingController::class, 'paymentMethods']);
+            Route::post('billing/invoices/{billingInvoice}/pay',                [CompanyBillingController::class, 'submitPayment']);
+            Route::post('billing/invoices/{billingInvoice}/negotiate',          [CompanyBillingController::class, 'submitNegotiation']);
+        });
+
+        // ── Admin billing ──────────────────────────────────────────
+        Route::prefix('admin/billing')->group(function () {
+            // Invoices
+            Route::get('invoices',                                      [AdminBillingController::class, 'index']);
+            Route::post('invoices/generate',                            [AdminBillingController::class, 'generate']);
+            Route::get('invoices/{billingInvoice}',                     [AdminBillingController::class, 'show']);
+            Route::post('invoices/{billingInvoice}/send',               [AdminBillingController::class, 'send']);
+            Route::delete('invoices/{billingInvoice}',                  [AdminBillingController::class, 'destroy']);
+
+            // Payments / receipts
+            Route::get('pending-payments',                              [AdminBillingController::class, 'pendingPayments']);
+            Route::post('payments/{billingPayment}/verify',             [AdminBillingController::class, 'verifyPayment']);
+            Route::post('payments/{billingPayment}/reject',             [AdminBillingController::class, 'rejectPayment']);
+
+            // Negotiations
+            Route::get('negotiations',                                          [AdminBillingController::class, 'pendingNegotiations']);
+            Route::post('negotiations/{billingNegotiation}/approve',            [AdminBillingController::class, 'approveNegotiation']);
+            Route::post('negotiations/{billingNegotiation}/reject',             [AdminBillingController::class, 'rejectNegotiation']);
+
+            // Payment methods management
+            Route::get('payment-methods',                               [AdminPaymentMethodController::class, 'index']);
+            Route::post('payment-methods',                              [AdminPaymentMethodController::class, 'store']);
+            Route::put('payment-methods/{paymentMethod}',               [AdminPaymentMethodController::class, 'update']);
+            Route::delete('payment-methods/{paymentMethod}',            [AdminPaymentMethodController::class, 'destroy']);
+            Route::patch('payment-methods/{paymentMethod}/toggle',      [AdminPaymentMethodController::class, 'toggleActive']);
+        });
     });
 });
