@@ -28,7 +28,7 @@ class GymTeamController extends Controller
 
     private function requiresManage(): void
     {
-        if (!auth()->user()->hasPermission('gym.team.manage')) {
+        if (!auth()->user()->hasPermission('gym.team.view')) {
             abort(403, 'You do not have permission to manage gym staff.');
         }
     }
@@ -74,7 +74,7 @@ class GymTeamController extends Controller
             'name'                => $request->name,
             'email'               => $request->email,
             'password'            => Hash::make($tempPassword),
-            'role'                => 'gym_staff',
+            'role'                => $request->role,
             'is_active'           => false,
             'must_reset_password' => true,
             'created_by'          => auth()->id(),
@@ -133,7 +133,8 @@ class GymTeamController extends Controller
         $this->requiresManage();
 
         $allPerms  = Permission::where('scope', 'gym')->orderBy('group_name')->orderBy('label')->get();
-        $rolePerms = RolePermission::whereIn('role', ['gym_partner', 'gym_staff'])->get()->groupBy('role');
+        $rolePerms = RolePermission::whereIn('role', array_merge(['gym_partner'], User::GYM_SUB_ROLES))
+            ->get()->groupBy('role');
 
         return response()->json(['permissions' => $allPerms, 'role_permissions' => $rolePerms]);
     }
@@ -141,13 +142,15 @@ class GymTeamController extends Controller
     public function updateRolePermissions(Request $request, string $role): JsonResponse
     {
         $this->requiresManage();
-        if ($role !== 'gym_staff') abort(422, 'Only gym_staff permissions can be edited.');
+        if (!in_array($role, User::GYM_SUB_ROLES)) {
+            abort(422, 'Only sub-role permissions can be edited.');
+        }
 
         $request->validate(['permissions' => 'required|array']);
 
-        RolePermission::where('role', 'gym_staff')->delete();
+        RolePermission::where('role', $role)->delete();
         foreach ($request->permissions as $perm) {
-            RolePermission::create(['role' => 'gym_staff', 'permission_name' => $perm]);
+            RolePermission::create(['role' => $role, 'permission_name' => $perm]);
         }
 
         return response()->json(['message' => 'Staff permissions updated.']);

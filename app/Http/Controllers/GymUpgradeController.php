@@ -29,7 +29,10 @@ class GymUpgradeController extends Controller
 
     private function getMyGym(): Gym
     {
-        $gym = Gym::where('contact_email', auth()->user()->email)->first();
+        $user = auth()->user();
+        $gym  = $user->gym_id
+            ? Gym::find($user->gym_id)
+            : Gym::where('contact_email', $user->email)->first();
         if (!$gym) abort(403, 'No gym is linked to this partner account.');
         return $gym;
     }

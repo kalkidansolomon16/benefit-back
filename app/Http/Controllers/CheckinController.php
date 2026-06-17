@@ -24,7 +24,7 @@ class CheckinController extends Controller
             ->when($request->employee_id, fn($q) => $q->where('employee_id', $request->employee_id))
             ->when($request->date,        fn($q) => $q->whereDate('checked_in_at', $request->date))
             ->latest('checked_in_at')
-            ->paginate(20);
+            ->paginate(10);
 
         return CheckinResource::collection($checkins);
     }
@@ -225,7 +225,10 @@ class CheckinController extends Controller
         $gymId = $request->gym_id;
 
         if (!$gymId) {
-            $gym   = Gym::where('contact_email', auth()->user()->email)->first();
+            $user  = auth()->user();
+            $gym   = $user->gym_id
+                ? Gym::find($user->gym_id)
+                : Gym::where('contact_email', $user->email)->first();
             $gymId = $gym?->id;
         }
 

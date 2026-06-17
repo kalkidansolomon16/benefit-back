@@ -16,7 +16,7 @@ class AdminUserController extends Controller
 {
     private function requiresManage(): void
     {
-        if (!auth()->user()->hasPermission('team.manage')) {
+        if (!auth()->user()->hasPermission('team.view')) {
             abort(403, 'You do not have permission to manage team members.');
         }
     }
@@ -120,38 +120,68 @@ class AdminUserController extends Controller
         return response()->json(['message' => 'User removed.']);
     }
 
-    /* ── List all admin-scope permissions (for the matrix) ──── */
+    /* ── All-scope permissions matrix (admin + company + gym) ── */
 
     public function permissions(): JsonResponse
     {
-        $allPerms = Permission::where('scope', 'admin')
-            ->orderBy('group_name')
-            ->orderBy('label')
-            ->get();
+        // ── Admin scope ───────────────────────────────────────────
+        $adminPerms = Permission::where('scope', 'admin')
+            ->orderBy('group_name')->orderBy('label')->get();
 
-        // Load all editable admin sub-roles dynamically from the roles table
-        $subRoles = Role::where('scope', 'admin')
+        $adminRoles = Role::where('scope', 'admin')
             ->where('name', '!=', 'fitaccess_admin')
             ->orderBy('created_at')
             ->get(['name', 'label']);
 
-        $roleNames = $subRoles->pluck('name')->toArray();
+        $adminRoleNames  = $adminRoles->pluck('name')->toArray();
+        $adminRolePerms  = RolePermission::whereIn('role', $adminRoleNames)->get()->groupBy('role');
 
-        $rolePerms = RolePermission::whereIn('role', $roleNames)
-            ->get()
-            ->groupBy('role');
+        // ── Company scope ─────────────────────────────────────────
+        $companyPerms = Permission::where('scope', 'company')
+            ->orderBy('group_name')->orderBy('label')->get();
+
+        // Exactly 3 canonical company roles shown in the permissions matrix
+        $companyRoles     = ['co_hr', 'company_finance', 'company_ceo'];
+        $companyRolePerms = RolePermission::whereIn('role', $companyRoles)->get()->groupBy('role');
+
+        // ── Gym scope ─────────────────────────────────────────────
+        $gymPerms = Permission::where('scope', 'gym')
+            ->orderBy('group_name')->orderBy('label')->get();
+
+        $gymRoles     = User::GYM_SUB_ROLES;
+        $gymRolePerms = RolePermission::whereIn('role', $gymRoles)->get()->groupBy('role');
+
+        $roleLabel = fn(string $name): string =>
+            match ($name) {
+                'co_hr', 'company_hr', 'gym_hr'                    => 'HR',
+                'co_executive', 'company_ceo', 'gym_executive'      => 'Executive',
+                'co_finance', 'company_finance', 'gym_finance'      => 'Finance',
+                default => ucwords(str_replace(['admin_', 'co_', 'gym_', 'company_', '_'], ['', '', '', '', ' '], $name)),
+            };
 
         return response()->json([
-            'permissions'      => $allPerms,
-            'role_permissions' => $rolePerms,
-            'roles'            => $subRoles->map(fn($r) => [
-                'key'   => $r->name,
-                'label' => $r->label ?? ucwords(str_replace(['admin_', '_'], ['', ' '], $r->name)),
-            ])->values(),
+            'admin' => [
+                'permissions'      => $adminPerms,
+                'roles'            => $adminRoles->map(fn($r) => [
+                    'key'   => $r->name,
+                    'label' => $r->label ?? $roleLabel($r->name),
+                ])->values(),
+                'role_permissions' => $adminRolePerms,
+            ],
+            'company' => [
+                'permissions'      => $companyPerms,
+                'roles'            => array_map(fn($r) => ['key' => $r, 'label' => $roleLabel($r)], $companyRoles),
+                'role_permissions' => $companyRolePerms,
+            ],
+            'gym' => [
+                'permissions'      => $gymPerms,
+                'roles'            => array_map(fn($r) => ['key' => $r, 'label' => $roleLabel($r)], $gymRoles),
+                'role_permissions' => $gymRolePerms,
+            ],
         ]);
     }
 
-    /* ── Update permissions for a role ──────────────────────── */
+    /* ── Update permissions for any sub-role ────────────────── */
 
     public function updateRolePermissions(Request $request, string $role): JsonResponse
     {
@@ -159,9 +189,14 @@ class AdminUserController extends Controller
             abort(403, 'Only admins with permissions.manage can update role permissions.');
         }
 
-        $validSubRoles = User::dynamicAdminSubRoles();
-        if (!in_array($role, $validSubRoles)) {
-            abort(422, 'Only admin sub-role permissions can be edited.');
+        $allEditableRoles = array_merge(
+            User::dynamicAdminSubRoles(),
+            User::COMPANY_SUB_ROLES,
+            User::GYM_SUB_ROLES,
+        );
+
+        if (!in_array($role, $allEditableRoles)) {
+            abort(422, 'Only sub-role permissions can be edited here.');
         }
 
         $request->validate(['permissions' => 'required|array']);

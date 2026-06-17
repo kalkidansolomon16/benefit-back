@@ -20,6 +20,22 @@ class TelegramService
         $this->apiBase = "https://api.telegram.org/bot{$this->token}";
     }
 
+    private function http(): \Illuminate\Http\Client\PendingRequest
+    {
+        $http = Http::timeout(15);
+
+        // Only skip SSL verification and use proxy in local development
+        if (app()->environment('local')) {
+            $http = $http->withoutVerifying();
+            $proxy = config('services.telegram.proxy');
+            if ($proxy) {
+                $http = $http->withOptions(['proxy' => $proxy]);
+            }
+        }
+
+        return $http;
+    }
+
     /* ── Core HTTP helpers ─────────────────────────────────────────── */
 
     public function sendMessage(int|string $chatId, string $text, ?array $keyboard = null, string $parseMode = 'HTML'): ?array
@@ -37,7 +53,7 @@ class TelegramService
         }
 
         try {
-            $response = Http::timeout(5)->post("{$this->apiBase}/sendMessage", $payload);
+            $response = $this->http()->post("{$this->apiBase}/sendMessage", $payload);
             return $response->json();
         } catch (\Throwable $e) {
             Log::warning("Telegram sendMessage failed: {$e->getMessage()}");
@@ -60,7 +76,7 @@ class TelegramService
         }
 
         try {
-            Http::timeout(5)->post("{$this->apiBase}/editMessageText", $payload);
+            $this->http()->post("{$this->apiBase}/editMessageText", $payload);
         } catch (\Throwable $e) {
             Log::warning("Telegram editMessageText failed: {$e->getMessage()}");
         }
@@ -70,7 +86,7 @@ class TelegramService
     {
         if (!$this->token) return;
         try {
-            Http::timeout(5)->post("{$this->apiBase}/answerCallbackQuery", [
+            $this->http()->post("{$this->apiBase}/answerCallbackQuery", [
                 'callback_query_id' => $callbackId,
                 'text'              => $text,
                 'show_alert'        => $showAlert,

@@ -10,9 +10,15 @@ class PartnerPortalController extends Controller
 {
     private function getMyGym(): Gym
     {
-        $gym = Gym::where('contact_email', auth()->user()->email)
-            ->withCount(['checkins', 'activeMembers'])
-            ->first();
+        $user = auth()->user();
+
+        $query = Gym::withCount(['checkins', 'activeMembers']);
+
+        if ($user->gym_id) {
+            $gym = $query->find($user->gym_id);
+        } else {
+            $gym = $query->where('contact_email', $user->email)->first();
+        }
 
         if (!$gym) {
             abort(403, 'No gym is linked to this partner account.');

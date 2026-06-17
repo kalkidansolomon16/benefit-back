@@ -153,6 +153,96 @@ class RolesController extends Controller
     }
 
     /* ════════════════════════════════════════════════════════
+     |  ADMIN → COMPANY ROLES  (manage any company's roles)
+     ╚════════════════════════════════════════════════════════ */
+
+    public function adminCompanyRoles(Company $company): JsonResponse
+    {
+        $roles = Role::where('scope', 'company')
+            ->where(fn($q) => $q->whereNull('company_id')->orWhere('company_id', $company->id))
+            ->orderBy('is_system', 'desc')
+            ->orderBy('created_at')
+            ->get()
+            ->map(fn($r) => $this->format($r));
+
+        return response()->json($roles);
+    }
+
+    public function adminCompanyStore(Request $request, Company $company): JsonResponse
+    {
+        $request->validate(['label' => 'required|string|max:80']);
+
+        $slug = Role::makeSlug($request->label, 'co_' . $company->id);
+
+        $role = Role::create([
+            'name'       => $slug,
+            'label'      => $request->label,
+            'scope'      => 'company',
+            'company_id' => $company->id,
+            'is_system'  => false,
+            'created_by' => auth()->id(),
+        ]);
+
+        return response()->json(['message' => 'Role created.', 'role' => $this->format($role)], 201);
+    }
+
+    public function adminCompanyDestroy(Company $company, Role $role): JsonResponse
+    {
+        if ($role->company_id !== $company->id) abort(403, 'Role does not belong to this company.');
+        $this->assertDeletable($role, 'company');
+
+        RolePermission::where('role', $role->name)->delete();
+        $role->delete();
+
+        return response()->json(['message' => 'Role deleted.']);
+    }
+
+    /* ════════════════════════════════════════════════════════
+     |  ADMIN → GYM ROLES  (manage any gym's roles)
+     ╚════════════════════════════════════════════════════════ */
+
+    public function adminGymRoles(Gym $gym): JsonResponse
+    {
+        $roles = Role::where('scope', 'gym')
+            ->where(fn($q) => $q->whereNull('gym_id')->orWhere('gym_id', $gym->id))
+            ->orderBy('is_system', 'desc')
+            ->orderBy('created_at')
+            ->get()
+            ->map(fn($r) => $this->format($r));
+
+        return response()->json($roles);
+    }
+
+    public function adminGymStore(Request $request, Gym $gym): JsonResponse
+    {
+        $request->validate(['label' => 'required|string|max:80']);
+
+        $slug = Role::makeSlug($request->label, 'gym_' . $gym->id);
+
+        $role = Role::create([
+            'name'       => $slug,
+            'label'      => $request->label,
+            'scope'      => 'gym',
+            'gym_id'     => $gym->id,
+            'is_system'  => false,
+            'created_by' => auth()->id(),
+        ]);
+
+        return response()->json(['message' => 'Role created.', 'role' => $this->format($role)], 201);
+    }
+
+    public function adminGymDestroy(Gym $gym, Role $role): JsonResponse
+    {
+        if ($role->gym_id !== $gym->id) abort(403, 'Role does not belong to this gym.');
+        $this->assertDeletable($role, 'gym');
+
+        RolePermission::where('role', $role->name)->delete();
+        $role->delete();
+
+        return response()->json(['message' => 'Role deleted.']);
+    }
+
+    /* ════════════════════════════════════════════════════════
      |  HELPERS
      ╚════════════════════════════════════════════════════════ */
 

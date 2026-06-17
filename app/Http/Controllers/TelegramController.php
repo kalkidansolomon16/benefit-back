@@ -91,8 +91,23 @@ class TelegramController extends Controller
             return;
         }
 
-        $user = User::where('telegram_link_token', strtoupper($code))
-            ->where('telegram_link_expires_at', '>', now())
+        $upperCode = strtoupper($code);
+        $nowTime   = now();
+
+        $dbRow = \DB::selectOne(
+            'SELECT id, telegram_link_token, telegram_link_expires_at FROM users WHERE telegram_link_token = ?',
+            [$upperCode]
+        );
+
+        Log::info('Telegram /link debug', [
+            'received_code' => $code,
+            'upper_code'    => $upperCode,
+            'php_now'       => $nowTime->toDateTimeString(),
+            'db_row'        => $dbRow ? (array) $dbRow : null,
+        ]);
+
+        $user = User::where('telegram_link_token', $upperCode)
+            ->where('telegram_link_expires_at', '>', $nowTime)
             ->first();
 
         if (!$user) {

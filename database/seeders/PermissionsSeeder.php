@@ -78,48 +78,54 @@ class PermissionsSeeder extends Seeder
             ['name' => 'team.delete',             'label' => 'Remove Team Member',       'group_name' => 'Team & Access', 'scope' => 'admin'],
             ['name' => 'permissions.manage',      'label' => 'Manage Permissions',       'group_name' => 'Team & Access', 'scope' => 'admin'],
 
-            // ── Company scope: Navigation ─────────────────────────
+            // ── Company scope: Dashboard ─────────────────────────
             ['name' => 'co.dashboard.view',       'label' => 'View Dashboard',           'group_name' => 'Dashboard',     'scope' => 'company'],
-            ['name' => 'co.employees.view',       'label' => 'View Employees',           'group_name' => 'Employees',     'scope' => 'company'],
-            ['name' => 'co.employees.register',   'label' => 'Register Employee (Nav)',  'group_name' => 'Employees',     'scope' => 'company'],
-            ['name' => 'co.billing.view',         'label' => 'View Billing',             'group_name' => 'Billing',       'scope' => 'company'],
-            ['name' => 'co.reports.view',         'label' => 'View Reports',             'group_name' => 'Reports',       'scope' => 'company'],
-            ['name' => 'co.team.view',            'label' => 'View Team',                'group_name' => 'Team & Access', 'scope' => 'company'],
 
-            // ── Company scope: Employees CRUD ─────────────────────
-            ['name' => 'co.employees.create',     'label' => 'Register New Employee',    'group_name' => 'Employees',     'scope' => 'company'],
+            // ── Company scope: Employees ──────────────────────────
+            ['name' => 'co.employees.view',       'label' => 'View Employees',           'group_name' => 'Employees',     'scope' => 'company'],
+            ['name' => 'co.employees.register',   'label' => 'Access Register Page',     'group_name' => 'Employees',     'scope' => 'company'],
+            ['name' => 'co.employees.create',     'label' => 'Create Employee',          'group_name' => 'Employees',     'scope' => 'company'],
             ['name' => 'co.employees.approve',    'label' => 'Approve Employee',         'group_name' => 'Employees',     'scope' => 'company'],
             ['name' => 'co.employees.reject',     'label' => 'Reject Employee',          'group_name' => 'Employees',     'scope' => 'company'],
             ['name' => 'co.employees.ban',        'label' => 'Ban Employee',             'group_name' => 'Employees',     'scope' => 'company'],
 
-            // ── Company scope: Billing CRUD ───────────────────────
+            // ── Company scope: Billing ────────────────────────────
+            ['name' => 'co.billing.view',         'label' => 'View Billing & Invoices',  'group_name' => 'Billing',       'scope' => 'company'],
             ['name' => 'co.billing.pay',          'label' => 'Submit Payment',           'group_name' => 'Billing',       'scope' => 'company'],
             ['name' => 'co.billing.negotiate',    'label' => 'Request Extension',        'group_name' => 'Billing',       'scope' => 'company'],
 
-            // ── Company scope: Team CRUD ──────────────────────────
-            ['name' => 'co.team.create',          'label' => 'Add Team Member',          'group_name' => 'Team & Access', 'scope' => 'company'],
-            ['name' => 'co.team.edit',            'label' => 'Edit Team Member',         'group_name' => 'Team & Access', 'scope' => 'company'],
-            ['name' => 'co.team.delete',          'label' => 'Remove Team Member',       'group_name' => 'Team & Access', 'scope' => 'company'],
+            // ── Company scope: Reports ────────────────────────────
+            ['name' => 'co.reports.view',         'label' => 'View Reports',             'group_name' => 'Reports',       'scope' => 'company'],
 
-            // ── Gym scope: Navigation ─────────────────────────────
+            // ── Company scope: Team ───────────────────────────────
+            ['name' => 'co.team.view',            'label' => 'View Team Members',        'group_name' => 'Team',          'scope' => 'company'],
+            ['name' => 'co.team.create',          'label' => 'Add Team Member',          'group_name' => 'Team',          'scope' => 'company'],
+            ['name' => 'co.team.edit',            'label' => 'Edit Team Member',         'group_name' => 'Team',          'scope' => 'company'],
+            ['name' => 'co.team.delete',          'label' => 'Remove Team Member',       'group_name' => 'Team',          'scope' => 'company'],
+
+            // ── Gym scope: Dashboard ──────────────────────────────
             ['name' => 'gym.dashboard.view',      'label' => 'View Dashboard',           'group_name' => 'Dashboard',     'scope' => 'gym'],
-            ['name' => 'gym.checkins.view',       'label' => 'View Check-ins',           'group_name' => 'Check-ins',     'scope' => 'gym'],
-            ['name' => 'gym.facility.view',       'label' => 'View Facility Info',       'group_name' => 'Facility',      'scope' => 'gym'],
-            ['name' => 'gym.team.view',           'label' => 'View Staff',               'group_name' => 'Team & Access', 'scope' => 'gym'],
-            ['name' => 'gym.members.view',        'label' => 'View Members',             'group_name' => 'Members',       'scope' => 'gym'],
-            ['name' => 'gym.reports.view',        'label' => 'View Reports',             'group_name' => 'Reports',       'scope' => 'gym'],
 
-            // ── Gym scope: Check-ins CRUD ─────────────────────────
+            // ── Gym scope: Check-ins ──────────────────────────────
+            ['name' => 'gym.checkins.view',       'label' => 'View Check-ins',           'group_name' => 'Check-ins',     'scope' => 'gym'],
             ['name' => 'gym.checkins.create',     'label' => 'Record Check-in',          'group_name' => 'Check-ins',     'scope' => 'gym'],
 
-            // ── Gym scope: Facility CRUD ──────────────────────────
+            // ── Gym scope: Facility ───────────────────────────────
+            ['name' => 'gym.facility.view',       'label' => 'View Facility Info',       'group_name' => 'Facility',      'scope' => 'gym'],
             ['name' => 'gym.profile.edit',        'label' => 'Edit Gym Profile',         'group_name' => 'Facility',      'scope' => 'gym'],
             ['name' => 'gym.upgrade.request',     'label' => 'Request Tier Upgrade',     'group_name' => 'Facility',      'scope' => 'gym'],
 
-            // ── Gym scope: Team CRUD ──────────────────────────────
-            ['name' => 'gym.team.create',         'label' => 'Add Staff Member',         'group_name' => 'Team & Access', 'scope' => 'gym'],
-            ['name' => 'gym.team.edit',           'label' => 'Edit Staff Member',        'group_name' => 'Team & Access', 'scope' => 'gym'],
-            ['name' => 'gym.team.delete',         'label' => 'Remove Staff Member',      'group_name' => 'Team & Access', 'scope' => 'gym'],
+            // ── Gym scope: Members ────────────────────────────────
+            ['name' => 'gym.members.view',        'label' => 'View Members',             'group_name' => 'Members',       'scope' => 'gym'],
+
+            // ── Gym scope: Reports ────────────────────────────────
+            ['name' => 'gym.reports.view',        'label' => 'View Reports',             'group_name' => 'Reports',       'scope' => 'gym'],
+
+            // ── Gym scope: Team ───────────────────────────────────
+            ['name' => 'gym.team.view',           'label' => 'View Staff',               'group_name' => 'Team',          'scope' => 'gym'],
+            ['name' => 'gym.team.create',         'label' => 'Add Staff Member',         'group_name' => 'Team',          'scope' => 'gym'],
+            ['name' => 'gym.team.edit',           'label' => 'Edit Staff Member',        'group_name' => 'Team',          'scope' => 'gym'],
+            ['name' => 'gym.team.delete',         'label' => 'Remove Staff Member',      'group_name' => 'Team',          'scope' => 'gym'],
         ];
 
         foreach ($permissions as $p) {
@@ -178,31 +184,34 @@ class PermissionsSeeder extends Seeder
                 'co.billing.pay', 'co.billing.negotiate',
                 'co.team.create', 'co.team.edit', 'co.team.delete',
             ],
-            'company_finance' => [
-                'co.dashboard.view', 'co.billing.view', 'co.reports.view',
-                'co.billing.pay', 'co.billing.negotiate',
-            ],
-            'company_ceo' => [
-                'co.dashboard.view', 'co.employees.view',
-                'co.billing.view', 'co.reports.view',
-            ],
-            // Sub-roles assigned to company team members
+            // Company sub-roles (created by company_hr)
             'co_hr' => [
                 'co.dashboard.view',
                 'co.employees.view', 'co.employees.register',
-                'co.billing.view', 'co.reports.view', 'co.team.view',
                 'co.employees.create', 'co.employees.approve',
                 'co.employees.reject', 'co.employees.ban',
+                'co.billing.view', 'co.reports.view',
+                'co.team.view', 'co.team.create', 'co.team.edit', 'co.team.delete',
                 'co.billing.pay', 'co.billing.negotiate',
-                'co.team.create', 'co.team.edit', 'co.team.delete',
             ],
             'co_executive' => [
-                'co.dashboard.view', 'co.employees.view',
-                'co.billing.view', 'co.reports.view',
+                'co.dashboard.view',
+                'co.employees.view', 'co.billing.view', 'co.reports.view',
             ],
             'co_finance' => [
-                'co.dashboard.view', 'co.billing.view', 'co.reports.view',
-                'co.billing.pay', 'co.billing.negotiate',
+                'co.dashboard.view',
+                'co.billing.view', 'co.billing.pay', 'co.billing.negotiate',
+                'co.reports.view',
+            ],
+            // DB-named equivalents (created via Team Management)
+            'company_finance' => [
+                'co.dashboard.view',
+                'co.billing.view', 'co.billing.pay', 'co.billing.negotiate',
+                'co.reports.view',
+            ],
+            'company_ceo' => [
+                'co.dashboard.view',
+                'co.employees.view', 'co.billing.view', 'co.reports.view',
             ],
             'gym_partner' => [
                 'gym.dashboard.view', 'gym.checkins.view', 'gym.facility.view',
@@ -211,23 +220,19 @@ class PermissionsSeeder extends Seeder
                 'gym.profile.edit', 'gym.upgrade.request',
                 'gym.team.create', 'gym.team.edit', 'gym.team.delete',
             ],
-            // Sub-roles assigned to gym staff members
-            'gym_manager' => [
+            // Gym sub-roles (created by gym_partner)
+            'gym_hr' => [
                 'gym.dashboard.view', 'gym.checkins.view', 'gym.facility.view',
                 'gym.team.view', 'gym.members.view', 'gym.reports.view',
                 'gym.checkins.create',
                 'gym.team.create', 'gym.team.edit', 'gym.team.delete',
             ],
-            'gym_receptionist' => [
+            'gym_executive' => [
                 'gym.dashboard.view', 'gym.checkins.view',
-                'gym.checkins.create', 'gym.members.view',
+                'gym.facility.view', 'gym.members.view', 'gym.reports.view',
             ],
-            'gym_trainer' => [
-                'gym.dashboard.view', 'gym.checkins.view', 'gym.members.view',
-            ],
-            'gym_staff' => [
-                'gym.dashboard.view', 'gym.checkins.view',
-                'gym.checkins.create', 'gym.members.view',
+            'gym_finance' => [
+                'gym.dashboard.view', 'gym.reports.view',
             ],
         ];
 

@@ -21,7 +21,7 @@ class GymController extends Controller
             ->when($request->search, fn($q) => $q->where('name', 'like', "%{$request->search}%"))
             ->withCount(['activeMembers'])
             ->latest()
-            ->paginate(15);
+            ->paginate(10);
 
         return GymResource::collection($gyms);
     }
