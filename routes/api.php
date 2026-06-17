@@ -3,6 +3,7 @@
 use App\Http\Controllers\TelegramController;
 use App\Http\Controllers\TelegramSettingsController;
 use App\Http\Controllers\AdminBillingController;
+use App\Http\Controllers\ChapaController;
 use App\Http\Controllers\AdminNotificationController;
 use App\Http\Controllers\AdminPaymentMethodController;
 use App\Http\Controllers\AdminUserController;
@@ -142,6 +143,14 @@ Route::prefix('v1')->group(function () {
             Route::get('attendance-report',     [DashboardController::class, 'attendanceReport']);
         });
 
+        // Admin → company/gym custom role management
+        Route::get('companies/{company}/roles',          [RolesController::class, 'adminCompanyRoles']);
+        Route::post('companies/{company}/roles',         [RolesController::class, 'adminCompanyStore']);
+        Route::delete('companies/{company}/roles/{role}',[RolesController::class, 'adminCompanyDestroy']);
+        Route::get('gyms/{gym}/roles',                   [RolesController::class, 'adminGymRoles']);
+        Route::post('gyms/{gym}/roles',                  [RolesController::class, 'adminGymStore']);
+        Route::delete('gyms/{gym}/roles/{role}',         [RolesController::class, 'adminGymDestroy']);
+
         // Companies
         Route::post('companies/admin-create', [CompanyController::class, 'adminCreate']);
         Route::apiResource('companies', CompanyController::class);
@@ -237,6 +246,8 @@ Route::prefix('v1')->group(function () {
             Route::get('billing/payment-methods',                               [CompanyBillingController::class, 'paymentMethods']);
             Route::post('billing/invoices/{billingInvoice}/pay',                [CompanyBillingController::class, 'submitPayment']);
             Route::post('billing/invoices/{billingInvoice}/negotiate',          [CompanyBillingController::class, 'submitNegotiation']);
+            Route::post('billing/invoices/{billingInvoice}/chapa/initialize',   [ChapaController::class, 'initialize']);
+            Route::get('billing/chapa/verify',                                  [ChapaController::class, 'verify']);
         });
 
         // ── Admin billing ──────────────────────────────────────────

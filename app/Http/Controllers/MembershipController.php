@@ -26,7 +26,7 @@ class MembershipController extends Controller
                   ->orWhere('email', 'like', "%{$request->search}%")
             ))
             ->latest()
-            ->paginate(20);
+            ->paginate(10);
 
         return MembershipResource::collection($memberships);
     }

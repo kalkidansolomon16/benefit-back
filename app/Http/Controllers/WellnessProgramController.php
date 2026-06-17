@@ -16,7 +16,7 @@ class WellnessProgramController extends Controller
             ->when($request->is_online !== null, fn($q) => $q->where('is_online', $request->boolean('is_online')))
             ->withCount('employees')
             ->latest()
-            ->paginate(15);
+            ->paginate(10);
 
         return response()->json($programs);
     }

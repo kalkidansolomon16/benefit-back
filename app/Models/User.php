@@ -95,9 +95,9 @@ class User extends Authenticatable
             ->toArray();
     }
     /** Roles HR can create */
-    public const COMPANY_SUB_ROLES = ['company_finance', 'company_ceo'];
+    public const COMPANY_SUB_ROLES = ['co_hr', 'co_executive', 'co_finance', 'company_finance', 'company_ceo'];
     /** Roles gym owner can create */
-    public const GYM_SUB_ROLES = ['gym_staff'];
+    public const GYM_SUB_ROLES = ['gym_hr', 'gym_executive', 'gym_finance'];
 
     /* ── Permission system ─────────────────────────────────────── */
 

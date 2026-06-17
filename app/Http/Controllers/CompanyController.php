@@ -39,7 +39,7 @@ class CompanyController extends Controller
                 'employees as enrolled_employees_count' => fn($q) => $q->where('is_enrolled', true),
             ])
             ->latest()
-            ->paginate(15);
+            ->paginate(10);
 
         return CompanyResource::collection($companies);
     }

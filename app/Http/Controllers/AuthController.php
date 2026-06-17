@@ -37,20 +37,7 @@ class AuthController extends Controller
         if (!$user->is_active) {
             Auth::logout();
 
-            $isPending = match($user->role) {
-                'company_hr'  => Company::where('contact_email', $user->email)
-                                    ->where('business_license_status', 'pending')
-                                    ->exists(),
-                'employee'    => $user->employee?->registration_status === 'pending',
-                'gym_partner' => PartnerApplication::where('user_id', $user->id)
-                                    ->where('status', 'pending')
-                                    ->exists(),
-                default       => false,
-            };
-
-            $message = $isPending
-                ? 'Your account is pending approval. You will be notified once reviewed.'
-                : 'Account is deactivated.';
+            $message = 'Your account is pending approval. You will be notified once reviewed.';
 
             return response()->json(['message' => $message], 403);
         }
@@ -205,7 +192,7 @@ class AuthController extends Controller
                 'is_active'  => false, // pending HR approval
             ]);
 
-            Employee::create([
+            $employee = Employee::create([
                 'user_id'             => $user->id,
                 'company_id'          => $request->company_id,
                 'fan_number'          => $request->staff_id,
@@ -290,7 +277,7 @@ class AuthController extends Controller
                 ]);
 
                 // 2. Store the partner application
-                PartnerApplication::create([
+                $partnerApplication = PartnerApplication::create([
                     'user_id'                 => $user->id,
                     'facility_name'           => $request->facility_name,
                     'categories'              => $categories,

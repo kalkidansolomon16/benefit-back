@@ -26,7 +26,7 @@ class CompanyUserController extends Controller
 
     private function requiresManage(): void
     {
-        if (!auth()->user()->hasPermission('co.team.manage')) {
+        if (!auth()->user()->hasPermission('co.team.view')) {
             abort(403, 'You do not have permission to manage team members.');
         }
     }
@@ -38,7 +38,12 @@ class CompanyUserController extends Controller
         $this->requiresManage();
         $company = $this->getMyCompany();
 
-        $users = User::whereIn('role', User::COMPANY_SUB_ROLES)
+        $subRoles = Role::where('scope', 'company')
+            ->where(fn($q) => $q->whereNull('company_id')->orWhere('company_id', $company->id))
+            ->where('name', '!=', 'company_hr')
+            ->pluck('name')->toArray();
+
+        $users = User::whereIn('role', array_merge(User::COMPANY_SUB_ROLES, $subRoles))
             ->where('company_id', $company->id)
             ->orderByDesc('created_at')
             ->get()
