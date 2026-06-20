@@ -10,6 +10,9 @@ class PartnerPortalController extends Controller
 {
     private function getMyGym(): Gym
     {
+        $gym = Gym::where('contact_email', auth()->user()->email)
+            ->withCount(['checkins', 'activeMembers'])
+            ->first();
         $user = auth()->user();
 
         $query = Gym::withCount(['checkins', 'activeMembers']);

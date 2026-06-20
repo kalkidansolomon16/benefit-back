@@ -42,6 +42,31 @@ class EmployeePortalController extends Controller
 
         $planKey  = $myPlan?->tier  ?? $fallbackTier;
         $planName = $myPlan?->name  ?? ucfirst(str_replace('_', ' ', $planKey));
+        $planFee  = (float) ($myPlan?->monthly_fee_etb ?? 0);
+
+        // Accessible tiers: all active plans whose fee ≤ employee's plan fee
+        $allActivePlans = MembershipPlan::where('is_active', true)->orderBy('monthly_fee_etb')->get();
+
+        $accessibleTiers = $allActivePlans
+            ->filter(fn($p) => (float)$p->monthly_fee_etb <= $planFee)
+            ->pluck('tier')
+            ->push($planKey)          // always include own tier
+            ->unique()
+            ->values()
+            ->toArray();
+
+        // Fallback if no plans exist in DB yet
+        if (empty($accessibleTiers)) {
+            $accessibleTiers = match($planKey) {
+                'platinum'   => ['basic', 'basic_plus', 'premium', 'platinum'],
+                'basic_plus' => ['basic', 'basic_plus'],
+                default      => [$planKey],
+            };
+        }
+
+        // Accessible plan names (for the frontend filter labels)
+        $accessiblePlanLabels = $allActivePlans
+            ->filter(fn($p) => in_array($p->tier, $accessibleTiers))
 
         // Tier hierarchy: higher rank includes all lower tiers
         // Only standard tiers are included — custom/test plans are excluded from gym access

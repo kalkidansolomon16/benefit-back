@@ -169,6 +169,7 @@ class CompanyController extends Controller
 
         unset($data['business_license']);
 
+        $company->update($data);
         $old = $company->only(array_keys($data));
         $company->update($data);
         AuditLog::record('updated', $company, $old, $data);

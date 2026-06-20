@@ -70,6 +70,10 @@ class PartnerApplicationController extends Controller
         }
 
         $request->validate([
+            'tier' => 'required|in:basic,basic_plus,premium,platinum',
+        ]);
+
+        return DB::transaction(function () use ($request, $partnerApplication): JsonResponse {
             'tier' => 'required|string|max:50',
         ]);
 
@@ -112,6 +116,7 @@ class PartnerApplicationController extends Controller
                 'address'         => $address,
                 'sub_city'        => $partnerApplication->sub_city,
                 'city'            => $partnerApplication->city,
+                'tier'            => $request->tier,
                 'tier'            => $canonicalTier,
                 'max_capacity'    => $partnerApplication->max_capacity,
                 'facilities'      => array_merge(

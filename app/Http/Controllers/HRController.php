@@ -2,6 +2,9 @@
 
 namespace App\Http\Controllers;
 
+use App\Models\Company;
+use App\Models\Employee;
+use App\Models\User;
 use App\Models\AdminNotification;
 use App\Models\AuditLog;
 use App\Models\Company;
@@ -21,6 +24,10 @@ class HRController extends Controller
 
     private function getMyCompany(): Company
     {
+        $company = Company::where('contact_email', auth()->user()->email)->first();
+
+        if (!$company) {
+            abort(403, 'No company is associated with this HR account.');
         $user = auth()->user();
 
         // Sub-users (company_finance, company_ceo) are linked directly via company_id
@@ -50,6 +57,10 @@ class HRController extends Controller
 
     private function packageToLevel(string $package): string
     {
+        return match ($package) {
+            'platinum'   => 'chief',
+            'basic_plus' => 'director',
+            default      => 'staff',
         // Normalise: strip common tier prefixes (fit_, fir_, access_, etc.)
         // so 'fit_basic_plus' → 'basic_plus', 'fit_premium' → 'premium', etc.
         $norm = strtolower(preg_replace('/^[a-z]+_(?=basic|premium|platinum|gold|silver)/i', '', $package) ?? $package);
@@ -130,6 +141,8 @@ class HRController extends Controller
         $employees = $company->employees()
             ->with(['user:id,name,email,phone', 'activeMembership'])
             ->when($request->search, fn($q) => $q->where(function ($sub) use ($request) {
+                $sub->whereHas('user', fn($u) => $u->where('name', 'like', "%{$request->search}%"))
+                    ->orWhere('fan_number', 'like', "%{$request->search}%");
                 $sub->whereHas('user', fn($u) => $u
                     ->where('name',  'like', "%{$request->search}%")
                     ->orWhere('email', 'like', "%{$request->search}%")
@@ -184,6 +197,7 @@ class HRController extends Controller
         if ($employee->company_id !== $company->id) abort(403);
 
         $request->validate([
+            'plan' => 'nullable|string|exists:membership_plans,tier',
             'plan'               => 'nullable|string|max:50',
             'payment_preference' => 'required|in:pay_now,pay_later',
         ]);
@@ -192,6 +206,17 @@ class HRController extends Controller
         $level = $this->packageToLevel($tier);
 
         $employee->update([
+            'registration_status' => 'approved',
+            'is_enrolled'         => true,
+            'enrolled_at'         => now(),
+            'level'               => $level,
+            'payment_status'      => 'unpaid',   // awaiting company invoice payment
+        ]);
+
+        // Activate the user account so they can log in
+        $employee->user?->update(['is_active' => true]);
+
+        return response()->json(['message' => 'Employee approved and activated.', 'employee_id' => $employee->id]);
             'registration_status'   => 'approved',
             'admin_approval_status' => 'pending',
             'payment_preference'    => $request->payment_preference,
@@ -239,6 +264,9 @@ class HRController extends Controller
 
         $employee->update(['registration_status' => 'rejected']);
         $employee->user?->update(['is_active' => false]);
+
+        return response()->json(['message' => 'Employee registration rejected.', 'employee_id' => $employee->id]);
+    }
 
         AuditLog::record('updated', $employee, ['registration_status' => 'pending'], ['registration_status' => 'rejected']);
 
@@ -319,6 +347,19 @@ class HRController extends Controller
         $company = $this->getMyCompany();
 
         $request->validate([
+            'first_name'  => 'required|string|max:100',
+            'middle_name' => 'required|string|max:100',
+            'last_name'   => 'required|string|max:100',
+            'fan_number'  => 'required|string|size:13|unique:employees,fan_number|unique:users,fan_number',
+            'package'     => 'required|in:basic,basic_plus,platinum',
+            'job_title'   => 'nullable|string|max:255',
+            'department'  => 'nullable|string|max:255',
+            'phone'       => 'nullable|string|max:20',
+            'joined_at'   => 'nullable|date',
+            'photo'       => 'nullable|image|mimes:jpg,jpeg,png|max:5120',
+        ], [
+            'fan_number.size'   => 'FAN number must be exactly 13 digits.',
+            'fan_number.unique' => 'This FAN number is already registered.',
             'first_name'         => 'required|string|max:100',
             'middle_name'        => 'required|string|max:100',
             'last_name'          => 'required|string|max:100',
@@ -343,12 +384,50 @@ class HRController extends Controller
 
         $level    = $this->packageToLevel($request->package);
         $fullName = trim("{$request->first_name} {$request->middle_name} {$request->last_name}");
+        // Generate a unique email from the FAN number
+        $email    = "{$request->fan_number}@fitaccess.et";
+
+        if (User::where('email', $email)->exists()) {
+            $email = strtolower(str_replace(' ', '.', $fullName)) . "@fitaccess.et";
+        }
 
         $photoPath = null;
         if ($request->hasFile('photo')) {
             $photoPath = $request->file('photo')->store('employee-photos', 'public');
         }
 
+        return DB::transaction(function () use ($request, $company, $level, $fullName, $email, $photoPath): JsonResponse {
+            $user = User::create([
+                'name'       => $fullName,
+                'email'      => $email,
+                'password'   => Hash::make($request->fan_number), // default password = FAN number
+                'role'       => 'employee',
+                'phone'      => $request->phone,
+                'fan_number' => $request->fan_number,
+                'is_active'  => true,
+            ]);
+
+            $employee = Employee::create([
+                'user_id'    => $user->id,
+                'company_id' => $company->id,
+                'fan_number' => $request->fan_number,
+                'job_title'  => $request->job_title,
+                'level'      => $level,
+                'department' => $request->department,
+                'photo_path' => $photoPath,
+                'is_enrolled'=> true,
+                'enrolled_at'=> $request->joined_at ?? now(),
+            ]);
+
+            $employee->load('user');
+
+            return response()->json([
+                'message' => "Employee {$fullName} registered successfully.",
+                'employee' => [
+                    'id'         => $employee->id,
+                    'name'       => $fullName,
+                    'fan_number' => $employee->fan_number,
+                    'package'    => $request->package,
         return DB::transaction(function () use ($request, $company, $level, $fullName, $photoPath): JsonResponse {
             $user = User::create([
                 'name'       => $fullName,

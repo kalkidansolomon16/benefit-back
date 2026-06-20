@@ -44,7 +44,24 @@ class AuthController extends Controller
 
         $token = $user->createToken('fitaccess-token', [$user->role])->plainTextToken;
 
+        // Load gym staff role if partner app user
+        $gymStaff = null;
+        if (in_array($user->role, ['gym_staff', 'gym_partner'])) {
+        $gymStaff = \App\Models\GymStaff::where('user_id', $user->id)
+        ->where('is_active', true)
+        ->first();
+        }
+
         return response()->json([
+        'user'  => array_merge((new UserResource($user))->toArray($request), [
+        'member_code'          => $user->member_code,
+        'must_change_password' => $user->must_change_password ?? false,
+        'gym_staff_role'       => $gymStaff?->role,
+        'gym_id'               => $gymStaff?->gym_id,
+            ]),
+            'token' => $token,
+            ]);
+
             'user'               => new UserResource($user),
             'token'              => $token,
             'must_reset_password'=> $user->must_reset_password,
@@ -192,6 +209,7 @@ class AuthController extends Controller
                 'is_active'  => false, // pending HR approval
             ]);
 
+            Employee::create([
             $employee = Employee::create([
                 'user_id'             => $user->id,
                 'company_id'          => $request->company_id,
@@ -277,6 +295,7 @@ class AuthController extends Controller
                 ]);
 
                 // 2. Store the partner application
+                PartnerApplication::create([
                 $partnerApplication = PartnerApplication::create([
                     'user_id'                 => $user->id,
                     'facility_name'           => $request->facility_name,
@@ -350,11 +369,53 @@ class AuthController extends Controller
             return response()->json(['message' => 'Current password is incorrect.'], 422);
         }
 
-        $user->update(['password' => Hash::make($request->new_password)]);
+        $user->update([
+        'password'             => Hash::make($request->new_password),
+        'must_change_password' => false,
+        ]);
+        \App\Models\GymStaff::where('user_id', $user->id)
+        ->update(['must_change_password' => false]);
 
         return response()->json(['message' => 'Password changed successfully.']);
     }
 
+    public function registerMember(Request $request): JsonResponse
+{
+    $request->validate([
+        'name'     => 'required|string|max:255',
+        'email'    => 'required|email|unique:users,email',
+        'phone'    => 'required|string|max:20|unique:users,phone',
+        'password' => 'required|string|min:8',
+    ]);
+
+    $user = User::create([
+        'name'      => $request->name,
+        'email'     => $request->email,
+        'phone'     => $request->phone,
+        'password'  => Hash::make($request->password),
+        'role'      => 'member',
+        'is_active' => true,
+    ]);
+
+    $user->member_code = 'FA-' . str_pad($user->id, 5, '0', STR_PAD_LEFT);
+    $user->save();
+
+    $token = $user->createToken('fitaccess-token', ['member'])->plainTextToken;
+
+    return response()->json([
+        'token' => $token,
+        'user'  => [
+            'id'                   => $user->id,
+            'name'                 => $user->name,
+            'email'                => $user->email,
+            'phone'                => $user->phone,
+            'role'                 => $user->role,
+            'member_code'          => $user->member_code,
+            'is_active'            => $user->is_active,
+            'must_change_password' => false,
+        ],
+    ], 201);
+}
     /**
      * Forced first-login password reset.
      * User must already be authenticated. Clears the must_reset_password flag.
