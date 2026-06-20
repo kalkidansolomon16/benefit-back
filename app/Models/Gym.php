@@ -50,6 +50,11 @@ class Gym extends Model
         return $this->hasMany(Membership::class)->where('status', 'active');
     }
 
+    public function upgradeRequests(): HasMany
+    {
+        return $this->hasMany(\App\Models\GymUpgradeRequest::class);
+    }
+
     public function hasCapacity(): bool
     {
         return $this->available_slots > 0;

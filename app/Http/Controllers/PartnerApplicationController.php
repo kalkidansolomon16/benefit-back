@@ -4,6 +4,7 @@ namespace App\Http\Controllers;
 
 use App\Models\Gym;
 use App\Models\PartnerApplication;
+use App\Services\TelegramService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
@@ -73,6 +74,21 @@ class PartnerApplicationController extends Controller
         ]);
 
         return DB::transaction(function () use ($request, $partnerApplication): JsonResponse {
+            'tier' => 'required|string|max:50',
+        ]);
+
+        // Normalise to canonical tier so gym access-control keeps working.
+        // Strips common plan prefixes: 'fit_basic_plus' → 'basic_plus', 'fit_premium' → 'premium'.
+        $raw  = strtolower($request->tier);
+        $norm = preg_replace('/^[a-z]+_(?=basic|premium|platinum|gold|silver)/i', '', $raw) ?? $raw;
+        $canonicalTier = match (true) {
+            str_contains($norm, 'platinum') || str_contains($norm, 'gold') => 'platinum',
+            str_contains($norm, 'premium')                                 => 'premium',
+            str_contains($norm, 'basic_plus') || str_contains($norm, 'plus') => 'basic_plus',
+            default                                                        => 'basic',
+        };
+
+        return DB::transaction(function () use ($request, $partnerApplication, $canonicalTier): JsonResponse {
 
             // Build address from woreda + landmark
             $address = $partnerApplication->woreda;
@@ -101,6 +117,7 @@ class PartnerApplicationController extends Controller
                 'sub_city'        => $partnerApplication->sub_city,
                 'city'            => $partnerApplication->city,
                 'tier'            => $request->tier,
+                'tier'            => $canonicalTier,
                 'max_capacity'    => $partnerApplication->max_capacity,
                 'facilities'      => array_merge(
                     $partnerApplication->categories ?? [],
@@ -117,6 +134,11 @@ class PartnerApplicationController extends Controller
 
             // Activate the partner user account
             $partnerApplication->user?->update(['is_active' => true]);
+
+            // Telegram notification to partner
+            if ($partnerApplication->user) {
+                app(TelegramService::class)->notifyUserApproved($partnerApplication->user, 'partner');
+            }
 
             return response()->json([
                 'message' => "Partner approved. Gym \"{$gym->name}\" is now live.",
@@ -143,6 +165,11 @@ class PartnerApplicationController extends Controller
         ]);
 
         $partnerApplication->user?->update(['is_active' => false]);
+
+        // Telegram notification to partner
+        if ($partnerApplication->user) {
+            app(TelegramService::class)->notifyUserRejected($partnerApplication->user, 'partner', $request->reason);
+        }
 
         return response()->json(['message' => 'Application rejected.']);
     }
