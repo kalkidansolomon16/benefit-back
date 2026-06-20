@@ -61,12 +61,6 @@ class AuthController extends Controller
             ]),
             'token' => $token,
             ]);
-
-            'user'               => new UserResource($user),
-            'token'              => $token,
-            'must_reset_password'=> $user->must_reset_password,
-            'permissions'        => $user->effectivePermissions(),
-        ]);
     }
 
     public function logout(Request $request): JsonResponse
@@ -209,7 +203,6 @@ class AuthController extends Controller
                 'is_active'  => false, // pending HR approval
             ]);
 
-            Employee::create([
             $employee = Employee::create([
                 'user_id'             => $user->id,
                 'company_id'          => $request->company_id,
@@ -295,7 +288,6 @@ class AuthController extends Controller
                 ]);
 
                 // 2. Store the partner application
-                PartnerApplication::create([
                 $partnerApplication = PartnerApplication::create([
                     'user_id'                 => $user->id,
                     'facility_name'           => $request->facility_name,

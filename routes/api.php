@@ -1,22 +1,17 @@
 <?php
 
 use App\Http\Controllers\AdminBillingController;
-use App\Http\Controllers\AdminPaymentMethodController;
-use App\Http\Controllers\AppointmentController;
-use App\Http\Controllers\CompanyBillingController;
-use App\Http\Controllers\EmployeePortalController;
-use App\Http\Controllers\TelegramController;
-use App\Http\Controllers\TelegramSettingsController;
-use App\Http\Controllers\AdminBillingController;
-use App\Http\Controllers\ChapaController;
 use App\Http\Controllers\AdminNotificationController;
 use App\Http\Controllers\AdminPaymentMethodController;
 use App\Http\Controllers\AdminUserController;
 use App\Http\Controllers\AppointmentController;
+use App\Http\Controllers\ChapaController;
 use App\Http\Controllers\CompanyBillingController;
 use App\Http\Controllers\CompanyUserController;
 use App\Http\Controllers\EmployeePortalController;
 use App\Http\Controllers\GymTeamController;
+use App\Http\Controllers\TelegramController;
+use App\Http\Controllers\TelegramSettingsController;
 use App\Http\Controllers\HRController;
 use App\Http\Controllers\PartnerApplicationController;
 use App\Http\Controllers\PartnerPortalController;
@@ -159,6 +154,7 @@ Route::prefix('v1')->group(function () {
             Route::post('generate-code',    [TelegramSettingsController::class, 'generateCode']);
             Route::delete('unlink',         [TelegramSettingsController::class, 'unlink']);
         });
+        }); // closes prefix('partner') mobile group
 
         Route::post('auth/logout',             [AuthController::class, 'logout']);
         Route::get('auth/me',                  [AuthController::class, 'me']);

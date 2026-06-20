@@ -4,6 +4,7 @@ namespace App\Providers;
 
 use Illuminate\Auth\Notifications\ResetPassword;
 use Illuminate\Support\ServiceProvider;
+use Illuminate\Database\Schema\Builder;
 use Illuminate\Support\Facades\Gate;
 use App\Models\User;
 use Dedoc\Scramble\Scramble;
