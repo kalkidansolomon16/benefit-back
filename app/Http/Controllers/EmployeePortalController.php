@@ -64,29 +64,8 @@ class EmployeePortalController extends Controller
             };
         }
 
-        // Accessible plan names (for the frontend filter labels)
-        $accessiblePlanLabels = $allActivePlans
-            ->filter(fn($p) => in_array($p->tier, $accessibleTiers))
-
-        // Tier hierarchy: higher rank includes all lower tiers
-        // Only standard tiers are included — custom/test plans are excluded from gym access
-        $tierRank = ['basic' => 0, 'basic_plus' => 1, 'premium' => 2, 'platinum' => 3];
-        $myRank   = $tierRank[$planKey] ?? 0;
-
-        $accessibleTiers = array_keys(array_filter(
-            $tierRank,
-            fn($rank) => $rank <= $myRank
-        ));
-
-        // Fallback for unrecognised tier keys
-        if (empty($accessibleTiers)) {
-            $accessibleTiers = [$planKey];
-        }
-
-        // Fetch active plans to build labels (only standard tiers)
-        $allActivePlans = MembershipPlan::where('is_active', true)->orderBy('monthly_fee_etb')->get();
-
         // Accessible plan names (only the standard tiers that match)
+        $tierRank = ['basic' => 0, 'basic_plus' => 1, 'premium' => 2, 'platinum' => 3];
         $accessiblePlanLabels = $allActivePlans
             ->filter(fn($p) => in_array($p->tier, $accessibleTiers) && isset($tierRank[$p->tier]))
             ->mapWithKeys(fn($p) => [$p->tier => $p->name])

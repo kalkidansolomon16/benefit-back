@@ -106,21 +106,7 @@ class AdminBillingController extends Controller
             'billing_period' => 'required|string|max:30',
             'due_date'       => 'nullable|date',
             'notes'          => 'nullable|string|max:1000',
-        ]);
-
-        $company = Company::findOrFail($request->company_id);
-
-        // Get all enrolled + approved employees for this company
-        $employees = Employee::where('company_id', $company->id)
-            ->where('registration_status', 'approved')
-            ->where('is_enrolled', true)
-            ->get();
-
-        if ($employees->isEmpty()) {
-            return response()->json([
-                'message' => 'This company has no enrolled employees to invoice.',
-            ], 422);
-            'employee_id'    => 'nullable|exists:employees,id',   // optional: single-employee invoice
+            'employee_id'    => 'nullable|exists:employees,id',
         ]);
 
         $company   = Company::findOrFail($request->company_id);
@@ -156,7 +142,6 @@ class AdminBillingController extends Controller
             $tier = $this->levelToTier($emp->level ?? 'staff');
 
             if (!isset($planPriceCache[$tier])) {
-                $plan = MembershipPlan::where('tier', $tier)->first();
                 $plan = $this->findPlanByTier($tier);
                 $planPriceCache[$tier] = [
                     'name'  => $plan?->name ?? ucfirst(str_replace('_', ' ', $tier)),
@@ -302,12 +287,6 @@ class AdminBillingController extends Controller
                 ->where('registration_status', 'approved')
                 ->update(['payment_status' => 'paid']);
 
-            return response()->json([
-                'message' => 'Payment verified. All company employees are now marked as paid.',
-            // Provision gym memberships (payment_status = 'paid') for all
-            // enrolled + approved employees of this company.
-            // This is the ONLY place where memberships are created — never at
-            // employee approval time, always at invoice-payment verification.
             $result = MembershipService::provisionForCompany($billingPayment->company_id);
 
             return response()->json([

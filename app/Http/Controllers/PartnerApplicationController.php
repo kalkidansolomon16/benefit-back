@@ -73,10 +73,6 @@ class PartnerApplicationController extends Controller
             'tier' => 'required|in:basic,basic_plus,premium,platinum',
         ]);
 
-        return DB::transaction(function () use ($request, $partnerApplication): JsonResponse {
-            'tier' => 'required|string|max:50',
-        ]);
-
         // Normalise to canonical tier so gym access-control keeps working.
         // Strips common plan prefixes: 'fit_basic_plus' → 'basic_plus', 'fit_premium' → 'premium'.
         $raw  = strtolower($request->tier);
@@ -116,7 +112,6 @@ class PartnerApplicationController extends Controller
                 'address'         => $address,
                 'sub_city'        => $partnerApplication->sub_city,
                 'city'            => $partnerApplication->city,
-                'tier'            => $request->tier,
                 'tier'            => $canonicalTier,
                 'max_capacity'    => $partnerApplication->max_capacity,
                 'facilities'      => array_merge(
