@@ -264,4 +264,21 @@ class TelegramService
 
         $this->sendMessage($user->telegram_chat_id, $text);
     }
+
+    public function notifyUserBanned(User $user, string $until, string $reason = ''): void
+    {
+        if (!$user->telegram_chat_id) return;
+
+        $text = "🚫 <b>Your FitAccess gym access has been suspended.</b>"
+            . "\n\n<b>Suspended until:</b> " . htmlspecialchars($until);
+
+        if ($reason) {
+            $text .= "\n<b>Reason:</b> " . htmlspecialchars($reason);
+        }
+
+        $text .= "\n\nYou will not be able to log in until the suspension period ends."
+            . "\nContact your HR team if you believe this is a mistake.";
+
+        $this->sendMessage($user->telegram_chat_id, $text);
+    }
 }

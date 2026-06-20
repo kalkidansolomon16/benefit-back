@@ -34,6 +34,17 @@ class AuthController extends Controller
 
         $user = Auth::user();
 
+        // Check if employee is currently banned
+        if ($user->role === 'employee') {
+            $employee = \App\Models\Employee::where('user_id', $user->id)->first();
+            if ($employee && $employee->banned_until && $employee->banned_until->isFuture()) {
+                Auth::logout();
+                return response()->json([
+                    'message' => 'Your gym access is suspended until ' . $employee->banned_until->toDateString() . '. Please contact your HR team.',
+                ], 403);
+            }
+        }
+
         if (!$user->is_active) {
             Auth::logout();
 

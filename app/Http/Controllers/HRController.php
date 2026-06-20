@@ -242,6 +242,14 @@ class HRController extends Controller
 
         AuditLog::record('updated', $employee, ['banned_until' => null], ['banned_until' => $bannedUntil]);
 
+        if ($employee->user) {
+            app(TelegramService::class)->notifyUserBanned(
+                $employee->user,
+                $bannedUntil->toDateString(),
+                $data['ban_reason'] ?? ''
+            );
+        }
+
         return response()->json([
             'message'  => "Employee banned until {$bannedUntil->toDateString()}.",
             'employee' => $this->employeePayload($employee->fresh()),
