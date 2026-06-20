@@ -37,9 +37,22 @@ class AuthController extends Controller
         if (!$user->is_active) {
             Auth::logout();
 
-            $message = 'Your account is pending approval. You will be notified once reviewed.';
+            if ($user->role === 'employee') {
+                $employee = \App\Models\Employee::where('user_id', $user->id)->first();
+                if ($employee) {
+                    if ($employee->registration_status === 'pending') {
+                        return response()->json(['message' => 'Your application is pending HR approval. You will be notified once your company reviews it.'], 403);
+                    }
+                    if ($employee->admin_approval_status === 'rejected') {
+                        return response()->json(['message' => 'Your account has been rejected. Please contact your HR team for more information.'], 403);
+                    }
+                    if ($employee->admin_approval_status === 'pending') {
+                        return response()->json(['message' => 'Your account has been approved by HR and is now pending admin final approval. You will be notified once activated.'], 403);
+                    }
+                }
+            }
 
-            return response()->json(['message' => $message], 403);
+            return response()->json(['message' => 'Your account is inactive. Please contact support.'], 403);
         }
 
         $token = $user->createToken('fitaccess-token', [$user->role])->plainTextToken;
@@ -204,16 +217,17 @@ class AuthController extends Controller
             ]);
 
             $employee = Employee::create([
-                'user_id'             => $user->id,
-                'company_id'          => $request->company_id,
-                'fan_number'          => $request->staff_id,
-                'job_title'           => $request->job_position,
-                'department'          => $request->department,
-                'branch'              => $request->branch,
-                'level'               => 'staff',
-                'request_note'        => $request->request_note,
-                'registration_status' => 'pending',
-                'is_enrolled'         => false,
+                'user_id'               => $user->id,
+                'company_id'            => $request->company_id,
+                'fan_number'            => $request->staff_id,
+                'job_title'             => $request->job_position,
+                'department'            => $request->department,
+                'branch'                => $request->branch,
+                'level'                 => 'staff',
+                'request_note'          => $request->request_note,
+                'registration_status'   => 'pending',   // awaiting HR approval
+                'admin_approval_status' => 'pending',   // awaiting admin approval
+                'is_enrolled'           => false,
             ]);
 
             // Notify HR & admins via Telegram

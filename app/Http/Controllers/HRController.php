@@ -184,23 +184,25 @@ class HRController extends Controller
         $level = $this->packageToLevel($tier);
 
         $employee->update([
-            'registration_status' => 'approved',
-            'is_enrolled'         => true,
-            'enrolled_at'         => now(),
-            'level'               => $level,
-            'payment_status'      => 'unpaid',
+            'registration_status'   => 'approved',
+            'admin_approval_status' => 'pending',
+            'is_enrolled'           => true,
+            'enrolled_at'           => now(),
+            'level'                 => $level,
+            'payment_status'        => 'unpaid',
         ]);
 
-        $employee->user?->update(['is_active' => true]);
+        // User stays INACTIVE — admin must give final approval before they can log in
 
         AuditLog::record('updated', $employee, ['registration_status' => 'pending'], [
-            'registration_status' => 'approved',
+            'registration_status'   => 'approved',
+            'admin_approval_status' => 'pending',
         ]);
 
         app(TelegramService::class)->notifyUserApproved($employee->user, 'hr_approved');
 
         return response()->json([
-            'message'     => 'Employee approved and activated.',
+            'message'     => 'Employee approved by HR. Pending admin final approval before account is activated.',
             'employee_id' => $employee->id,
         ]);
     }
@@ -325,22 +327,23 @@ class HRController extends Controller
                 'role'                 => 'employee',
                 'phone'                => $request->phone,
                 'fan_number'           => $request->fan_number,
-                'is_active'            => true,
+                'is_active'            => false,   // activated only after admin approves
                 'must_change_password' => true,
             ]);
 
             $employee = Employee::create([
-                'user_id'             => $user->id,
-                'company_id'          => $company->id,
-                'fan_number'          => $request->fan_number,
-                'job_title'           => $request->job_title,
-                'level'               => $level,
-                'department'          => $request->department,
-                'photo_path'          => $photoPath,
-                'registration_status' => 'approved',
-                'is_enrolled'         => true,
-                'enrolled_at'         => $request->joined_at ?? now(),
-                'payment_status'      => 'unpaid',
+                'user_id'               => $user->id,
+                'company_id'            => $company->id,
+                'fan_number'            => $request->fan_number,
+                'job_title'             => $request->job_title,
+                'level'                 => $level,
+                'department'            => $request->department,
+                'photo_path'            => $photoPath,
+                'registration_status'   => 'approved',   // HR-registered = already HR-approved
+                'admin_approval_status' => 'pending',    // still needs admin sign-off
+                'is_enrolled'           => true,
+                'enrolled_at'           => $request->joined_at ?? now(),
+                'payment_status'        => 'unpaid',
             ]);
 
             $employee->load('user');
