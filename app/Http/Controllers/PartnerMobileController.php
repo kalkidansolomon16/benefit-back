@@ -15,6 +15,7 @@ use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Hash;
+use App\Mail\StaffInviteMail;
 use Illuminate\Support\Facades\Mail;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Str;
@@ -435,7 +436,7 @@ class PartnerMobileController extends Controller
             $dailyActivity[] = [
                 'date'  => $dateStr,
                 'day'   => Carbon::parse($dateStr)->format('D'),
-                'count' => $days[$dateStr]?->count() ?? 0,
+                'count' => $days->get($dateStr)?->count() ?? 0,
             ];
         }
 
@@ -618,10 +619,7 @@ class PartnerMobileController extends Controller
                 'must_change_password' => true,
             ]);
 
-            // Send invite email — using Laravel mail
-            // Mail::to($email)->send(new StaffInviteMail($gym->name, $email, $tempPassword));
-            // For now log it — implement mail template separately
-            \Log::info("Staff invite: email={$email}, gym={$gym->name}, temp_password={$tempPassword}");
+            Mail::to($email)->send(new StaffInviteMail($gym->name, $email, $tempPassword));
         }
 
         return response()->json([

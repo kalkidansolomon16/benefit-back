@@ -97,6 +97,10 @@ Route::prefix('v1')->group(function () {
     });
 
 
+    // ── Partner app password reset (code-based, mobile-friendly) ────
+    Route::post('auth/partner/forgot-password', [AuthController::class, 'forgotPassword'])->middleware('throttle:5,1');
+    Route::post('auth/partner/reset-password',  [AuthController::class, 'resetPassword'])->middleware('throttle:5,1');
+
     // ── Telegram webhook (public — Telegram must reach this) ─────────
     Route::post('telegram/webhook',        [TelegramController::class, 'webhook']);
 
@@ -138,6 +142,7 @@ Route::prefix('v1')->group(function () {
         // ── PARTNER MOBILE — Gym Staff / Owner (Partner App) ─────────────────
         Route::prefix('partner')->group(function () {
             Route::get('me',                     [\App\Http\Controllers\PartnerMobileController::class, 'me']);
+            Route::get('dashboard',              [\App\Http\Controllers\PartnerMobileController::class, 'dashboard']);
             Route::post('scan',                  [\App\Http\Controllers\PartnerMobileController::class, 'scan']);
             Route::get('visits/today',           [\App\Http\Controllers\PartnerMobileController::class, 'visitsToday']);
             Route::get('visits/monthly',         [\App\Http\Controllers\PartnerMobileController::class, 'visitsMonthly']);
@@ -317,14 +322,13 @@ Route::prefix('v1')->group(function () {
             Route::post('select-gym',   [CheckinController::class, 'selectGym']);
         });
 
-        // ── Partner / Gym portal ───────────────────────────────────
-        Route::prefix('partner')->group(function () {
-            Route::get('dashboard', [PartnerPortalController::class, 'dashboard']);
-            Route::get('dashboard',                       [PartnerPortalController::class, 'dashboard']);
-            Route::get('expected-visitors',               [CheckinController::class, 'expectedVisitors']);
-            Route::put('profile',                         [GymUpgradeController::class, 'updateProfile']);
-            Route::post('upgrade-request',                [GymUpgradeController::class, 'submitRequest']);
-            Route::get('upgrade-requests',                [GymUpgradeController::class, 'myRequests']);
+        // ── Partner / Gym portal (web portal routes — distinct from mobile partner routes above) ───
+        Route::prefix('partner-portal')->group(function () {
+            Route::get('dashboard',          [PartnerPortalController::class, 'dashboard']);
+            Route::get('expected-visitors',  [CheckinController::class, 'expectedVisitors']);
+            Route::put('profile',            [GymUpgradeController::class, 'updateProfile']);
+            Route::post('upgrade-request',   [GymUpgradeController::class, 'submitRequest']);
+            Route::get('upgrade-requests',   [GymUpgradeController::class, 'myRequests']);
         });
 
         // ── Company HR portal ──────────────────────────────────────

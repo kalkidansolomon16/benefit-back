@@ -4,6 +4,7 @@ namespace App\Http\Controllers;
 
 use App\Http\Resources\CompanyResource;
 use App\Http\Resources\UserResource;
+use App\Mail\PasswordResetCodeMail;
 use App\Models\Company;
 use App\Models\Employee;
 use App\Models\PartnerApplication;
@@ -14,6 +15,7 @@ use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Hash;
+use Illuminate\Support\Facades\Mail;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Validation\ValidationException;
 
@@ -77,14 +79,14 @@ class AuthController extends Controller
         }
 
         return response()->json([
-        'user'  => array_merge((new UserResource($user))->toArray($request), [
-        'member_code'          => $user->member_code,
-        'must_change_password' => $user->must_change_password ?? false,
-        'gym_staff_role'       => $gymStaff?->role,
-        'gym_id'               => $gymStaff?->gym_id,
+            'user'  => array_merge((new UserResource($user))->toArray($request), [
+                'member_code'          => $user->member_code,
+                'must_change_password' => $gymStaff?->must_change_password ?? ($user->must_reset_password ?? false),
+                'gym_staff_role'       => $gymStaff?->role,
+                'gym_id'               => $gymStaff?->gym_id,
             ]),
             'token' => $token,
-            ]);
+        ]);
     }
 
     public function logout(Request $request): JsonResponse
@@ -471,25 +473,22 @@ class AuthController extends Controller
 
         $user = User::where('email', $request->email)->where('is_active', true)->first();
 
+        // Deliberate vague response to avoid user enumeration
         if (!$user) {
-            // Deliberate vague response to avoid user enumeration
             return response()->json(['message' => 'If this email is registered, a reset code has been sent.']);
         }
 
-        $token   = strtoupper(substr(str_shuffle('ABCDEFGHJKLMNPQRSTUVWXYZ23456789'), 0, 8));
+        $code    = strtoupper(substr(str_shuffle('ABCDEFGHJKLMNPQRSTUVWXYZ23456789'), 0, 8));
         $expires = now()->addHour();
 
         $user->update([
-            'password_reset_token'      => Hash::make($token),
+            'password_reset_token'      => Hash::make($code),
             'password_reset_expires_at' => $expires,
         ]);
 
-        // TODO: send email with $token. For now return it in response.
-        return response()->json([
-            'message' => 'Reset code generated.',
-            'token'   => $token,       // remove this in production; email instead
-            'expires' => $expires->toDateTimeString(),
-        ]);
+        Mail::to($user->email)->send(new PasswordResetCodeMail($user->name, $code));
+
+        return response()->json(['message' => 'If this email is registered, a reset code has been sent.']);
     }
 
     /**
