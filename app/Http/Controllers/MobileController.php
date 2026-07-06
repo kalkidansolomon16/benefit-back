@@ -356,7 +356,7 @@ class MobileController extends Controller
                 'monthly_price'                  => (float) $plan->monthly_fee_etb,
                 'annual_price'                   => round($plan->monthly_fee_etb * 12 * 0.8, 2),
                 'features'                       => $plan->features ?? [],
-                'max_checkins_per_gym_per_month' => null, // unlimited for now
+                'max_checkins_per_gym_per_month' => $plan->max_checkins_per_gym_per_month,
                 'facilities_count'               => $counts,
                 'is_active'                      => $plan->is_active,
             ];

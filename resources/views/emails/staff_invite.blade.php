@@ -37,17 +37,21 @@
 
             <div class="cred-box">
                 <p>Email address<br><strong>{{ $email }}</strong></p>
+                @if($tempPassword)
                 <p>Temporary password<br><strong>{{ $tempPassword }}</strong></p>
+                @endif
             </div>
 
+            @if($tempPassword)
             <div class="warning">
                 ⚠️ You will be asked to set a new password the first time you sign in.
                 Please do not share these credentials with anyone.
             </div>
+            @endif
 
             <p>
                 Download the <strong>FitAccess Partner App</strong>, open it, and sign in
-                with the email and temporary password above.
+                with your email{{ $tempPassword ? ' and the temporary password above' : ' and your existing password' }}.
             </p>
 
             <p>If you were not expecting this invitation, please ignore this email or

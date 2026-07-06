@@ -15,7 +15,7 @@ class StaffInviteMail extends Mailable
     public function __construct(
         public readonly string $gymName,
         public readonly string $email,
-        public readonly string $tempPassword,
+        public readonly ?string $tempPassword,
     ) {}
 
     public function envelope(): Envelope
