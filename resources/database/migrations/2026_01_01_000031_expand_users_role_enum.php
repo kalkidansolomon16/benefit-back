@@ -10,16 +10,17 @@ return new class extends Migration {
         DB::statement("
             ALTER TABLE `users`
             MODIFY COLUMN `role` ENUM(
-                'super_admin',
-                'fitaccess_admin',
-                'admin_finance',
-                'admin_support',
-                'company_hr',
-                'company_finance',
-                'company_ceo',
-                'employee',
-                'gym_partner',
-                'gym_staff'
+        'super_admin',
+        'fitaccess_admin',
+        'admin_finance',
+        'admin_support',
+        'company_hr',
+        'company_finance',
+        'company_ceo',
+        'employee',
+        'gym_partner',
+        'gym_staff',
+        'member'
             ) NOT NULL
         ");
     }

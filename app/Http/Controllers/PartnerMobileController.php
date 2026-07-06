@@ -15,6 +15,7 @@ use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Hash;
+use App\Mail\StaffInviteMail;
 use Illuminate\Support\Facades\Mail;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Str;
@@ -435,7 +436,7 @@ class PartnerMobileController extends Controller
             $dailyActivity[] = [
                 'date'  => $dateStr,
                 'day'   => Carbon::parse($dateStr)->format('D'),
-                'count' => $days[$dateStr]?->count() ?? 0,
+                'count' => $days->get($dateStr)?->count() ?? 0,
             ];
         }
 
@@ -564,14 +565,19 @@ class PartnerMobileController extends Controller
             return response()->json(['message' => 'Owner access required.'], 403);
         }
 
-        $request->validate(['email' => 'required|email']);
+        $request->validate([
+            'email' => 'required|email',
+            'name'  => 'required|string|max:100',
+        ]);
 
         $gym   = $this->getMyGym($request);
         $email = $request->email;
+        $name  = $request->name;
 
-        // Check if already a staff member at this gym
+        // Check if this email is already registered
         $existingUser = User::where('email', $email)->first();
         if ($existingUser) {
+            // Already staff at this gym
             $alreadyStaff = GymStaff::where('user_id', $existingUser->id)
                 ->where('gym_id', $gym->id)
                 ->where('is_active', true)
@@ -579,31 +585,28 @@ class PartnerMobileController extends Controller
 
             if ($alreadyStaff) {
                 return response()->json([
-                    'message' => 'This email is already a staff member at your gym.',
+                    'message' => 'This person is already a staff member at your gym.',
                 ], 422);
             }
 
-            // Existing user — link them directly
-            GymStaff::updateOrCreate(
-                ['user_id' => $existingUser->id, 'gym_id' => $gym->id],
-                ['role' => 'staff', 'is_active' => true, 'must_change_password' => false]
-            );
+            // Staff at a different gym — not allowed
+            $otherGym = GymStaff::where('user_id', $existingUser->id)
+                ->where('is_active', true)
+                ->where('gym_id', '!=', $gym->id)
+                ->exists();
 
-            // Send notification
-            Notification::create([
-                'user_id' => $existingUser->id,
-                'title'   => 'Added to ' . $gym->name,
-                'body'    => "You have been added as staff at {$gym->name}. You can now use the partner app.",
-                'type'    => 'general',
-                'is_read' => false,
-            ]);
+            if ($otherGym) {
+                return response()->json([
+                    'message' => 'This person is already a staff member at another gym and cannot be added to yours.',
+                ], 422);
+            }
 
         } else {
             // New user — create account with temp password and send invite email
             $tempPassword = Str::random(10);
 
             $newUser = User::create([
-                'name'      => 'New Staff',
+                'name'      => $name,
                 'email'     => $email,
                 'password'  => Hash::make($tempPassword),
                 'role'      => 'gym_staff',
@@ -618,10 +621,7 @@ class PartnerMobileController extends Controller
                 'must_change_password' => true,
             ]);
 
-            // Send invite email — using Laravel mail
-            // Mail::to($email)->send(new StaffInviteMail($gym->name, $email, $tempPassword));
-            // For now log it — implement mail template separately
-            \Log::info("Staff invite: email={$email}, gym={$gym->name}, temp_password={$tempPassword}");
+            Mail::to($email)->send(new StaffInviteMail($gym->name, $email, $tempPassword));
         }
 
         return response()->json([
