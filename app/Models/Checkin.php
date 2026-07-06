@@ -8,10 +8,11 @@ use Illuminate\Database\Eloquent\Relations\BelongsTo;
 class Checkin extends Model
 {
     protected $fillable = [
-        'membership_id', 'gym_id', 'employee_id',
-        'checked_in_at', 'checked_out_at',
-        'recorded_by', 'method',
-    ];
+    'membership_id', 'gym_id', 'employee_id',
+    'user_id',
+    'checked_in_at', 'checked_out_at',
+    'recorded_by', 'method',
+        ];
 
     protected $casts = [
         'checked_in_at'  => 'datetime',
@@ -39,5 +40,9 @@ class Checkin extends Model
             return $this->checked_in_at->diffInMinutes($this->checked_out_at);
         }
         return null;
+    }
+    public function user(): \Illuminate\Database\Eloquent\Relations\BelongsTo
+    {
+    return $this->belongsTo(User::class);
     }
 }

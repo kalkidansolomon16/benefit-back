@@ -1,17 +1,17 @@
 <?php
 
-use App\Http\Controllers\TelegramController;
-use App\Http\Controllers\TelegramSettingsController;
 use App\Http\Controllers\AdminBillingController;
-use App\Http\Controllers\ChapaController;
 use App\Http\Controllers\AdminNotificationController;
 use App\Http\Controllers\AdminPaymentMethodController;
 use App\Http\Controllers\AdminUserController;
 use App\Http\Controllers\AppointmentController;
+use App\Http\Controllers\ChapaController;
 use App\Http\Controllers\CompanyBillingController;
 use App\Http\Controllers\CompanyUserController;
 use App\Http\Controllers\EmployeePortalController;
 use App\Http\Controllers\GymTeamController;
+use App\Http\Controllers\TelegramController;
+use App\Http\Controllers\TelegramSettingsController;
 use App\Http\Controllers\HRController;
 use App\Http\Controllers\PartnerApplicationController;
 use App\Http\Controllers\PartnerPortalController;
@@ -38,8 +38,80 @@ use Illuminate\Support\Facades\Route;
 
 Route::prefix('v1')->group(function () {
 
+    // ── Auth & public ────────────────────────────────────────────────
+    Route::post('auth/login',             [AuthController::class, 'login']);
+    Route::post('auth/register/company',  [AuthController::class, 'registerCompany']);
+    Route::post('auth/register/employee', [AuthController::class, 'registerEmployee']);
+    Route::post('auth/register/partner',  [AuthController::class, 'registerPartner']);
+    Route::get('public/companies',        [CompanyController::class, 'publicList']);
+    Route::post('auth/register/member', [\App\Http\Controllers\AuthController::class, 'registerMember']);
+
+    // Password reset
+    Route::post('auth/forgot-password', function (\Illuminate\Http\Request $request) {
+        $request->validate(['email' => 'required|email']);
+
+        $status = \Illuminate\Support\Facades\Password::sendResetLink(
+            $request->only('email')
+        );
+
+        return $status === \Illuminate\Support\Facades\Password::RESET_LINK_SENT
+            ? response()->json(['message' => 'Password reset link sent to your email.'])
+            : response()->json(['message' => 'We could not find a user with that email address.'], 422);
+    })->middleware('throttle:5,1');
+
+    Route::post('auth/reset-password', function (\Illuminate\Http\Request $request) {
+        $request->validate([
+            'token'    => 'required',
+            'email'    => 'required|email',
+            'password' => 'required|min:8|confirmed',
+        ]);
+
+        $status = \Illuminate\Support\Facades\Password::reset(
+            $request->only('email', 'password', 'password_confirmation', 'token'),
+            function ($user, $password) {
+                $user->forceFill([
+                    'password' => \Illuminate\Support\Facades\Hash::make($password),
+                ])->save();
+            }
+        );
+
+        return $status === \Illuminate\Support\Facades\Password::PASSWORD_RESET
+            ? response()->json(['message' => 'Password reset successfully.'])
+            : response()->json(['message' => 'Invalid or expired reset token.'], 422);
+    })->middleware('throttle:5,1');
+
+    Route::get('auth/reset-password-redirect', function (\Illuminate\Http\Request $request) {
+        $token = $request->query('token');
+        $email = $request->query('email');
+
+        // Return an HTML page with a button that opens the app
+        return response('<html><body style="font-family:sans-serif;text-align:center;padding:40px">
+        <h2>Reset Your FitAccess Password</h2>
+        <p>Click the button below to open the FitAccess app and reset your password.</p>
+        <a href="fitaccess://reset-password?token=' . $token . '&email=' . urlencode($email) . '" 
+           style="background:#4CD964;color:white;padding:14px 28px;border-radius:8px;text-decoration:none;font-weight:bold;display:inline-block;margin-top:20px">
+           Open FitAccess App
+        </a>
+        <p style="color:#999;font-size:12px;margin-top:20px">If the button does not work, copy this token into the app manually:<br><strong>' . $token . '</strong></p>
+    </body></html>', 200, ['Content-Type' => 'text/html']);
+    });
+
+
     // ── Telegram webhook (public — Telegram must reach this) ─────────
     Route::post('telegram/webhook',        [TelegramController::class, 'webhook']);
+
+    // ── File serving (public — filenames are random hashes, no auth needed) ─
+    Route::get('files/{path}', function (string $path) {
+        // Prevent directory traversal
+        $path     = ltrim($path, '/');
+        $fullPath = storage_path('app/public/' . $path);
+        $realPath = realpath($fullPath);
+        $realBase = realpath(storage_path('app/public'));
+        if (!$realPath || !str_starts_with($realPath, $realBase)) {
+            abort(404);
+        }
+        return response()->file($realPath);
+    })->where('path', '.*');
 
     // ── Auth & public ────────────────────────────────────────────────
     Route::post('auth/login',              [AuthController::class, 'login']);
@@ -54,6 +126,43 @@ Route::prefix('v1')->group(function () {
     // ── Protected ───────────────────────────────────────────────────
     Route::middleware('auth:sanctum')->group(function () {
 
+        Route::post('auth/logout',          [AuthController::class, 'logout']);
+        Route::get('auth/me',               [AuthController::class, 'me']);
+        Route::post('auth/change-password', [AuthController::class, 'changePassword']);
+        // ── MOBILE — Member (User App) ────────────────────────────────────────
+        Route::prefix('mobile')->group(function () {
+            Route::get('dashboard',              [\App\Http\Controllers\MobileController::class, 'dashboard']);
+            Route::get('qr-token',               [\App\Http\Controllers\MobileController::class, 'qrToken']);
+            Route::get('profile',                [\App\Http\Controllers\MobileController::class, 'profile']);
+            Route::patch('profile',              [\App\Http\Controllers\MobileController::class, 'updateProfile']);
+            Route::post('profile/photo',         [\App\Http\Controllers\MobileController::class, 'uploadPhoto']);
+            Route::get('checkins',               [\App\Http\Controllers\MobileController::class, 'checkins']);
+            Route::get('packages',               [\App\Http\Controllers\MobileController::class, 'packages']);
+            Route::get('subscription',           [\App\Http\Controllers\MobileController::class, 'subscription']);
+            Route::post('subscription',          [\App\Http\Controllers\MobileController::class, 'createSubscription']);
+            Route::post('subscription/cancel',   [\App\Http\Controllers\MobileController::class, 'cancelSubscription']);
+            Route::get('gyms',                   [\App\Http\Controllers\MobileController::class, 'gyms']);
+            Route::get('gyms/{gym}',             [\App\Http\Controllers\MobileController::class, 'gymDetail']);
+            Route::get('notifications',          [\App\Http\Controllers\MobileController::class, 'notifications']);
+            Route::patch('notifications/read-all', [\App\Http\Controllers\MobileController::class, 'markAllNotificationsRead']);
+            Route::patch('notifications/{notification}/read', [\App\Http\Controllers\MobileController::class, 'markNotificationRead']);
+        });
+
+        // ── PARTNER MOBILE — Gym Staff / Owner (Partner App) ─────────────────
+        Route::prefix('partner')->group(function () {
+            Route::get('me',                     [\App\Http\Controllers\PartnerMobileController::class, 'me']);
+            Route::post('scan',                  [\App\Http\Controllers\PartnerMobileController::class, 'scan']);
+            Route::get('visits/today',           [\App\Http\Controllers\PartnerMobileController::class, 'visitsToday']);
+            Route::get('visits/monthly',         [\App\Http\Controllers\PartnerMobileController::class, 'visitsMonthly']);
+            Route::get('reports',                [\App\Http\Controllers\PartnerMobileController::class, 'reports']);
+            Route::get('financials',             [\App\Http\Controllers\PartnerMobileController::class, 'financials']);
+            Route::get('staff',                  [\App\Http\Controllers\PartnerMobileController::class, 'staffList']);
+            Route::post('staff/invite',          [\App\Http\Controllers\PartnerMobileController::class, 'inviteStaff']);
+            Route::delete('staff/{gymStaff}',    [\App\Http\Controllers\PartnerMobileController::class, 'removeStaff']);
+            Route::patch('facility',             [\App\Http\Controllers\PartnerMobileController::class, 'updateFacility']);
+            Route::post('facility/photo',        [\App\Http\Controllers\PartnerMobileController::class, 'uploadFacilityPhoto']);
+        }); // closes prefix('partner') mobile group
+
         // ── Telegram user settings ────────────────────────────────────
         Route::prefix('telegram')->group(function () {
             Route::get('status',            [TelegramSettingsController::class, 'status']);
@@ -65,6 +174,37 @@ Route::prefix('v1')->group(function () {
         Route::get('auth/me',                  [AuthController::class, 'me']);
         Route::post('auth/change-password',    [AuthController::class, 'changePassword']);
         Route::post('auth/first-login-reset',  [AuthController::class, 'firstLoginReset']);
+
+        // ── Admin: test email (diagnostic) ───────────────────────────
+        Route::post('admin/test-email', function (\Illuminate\Http\Request $request) {
+            $request->validate(['email' => 'required|email']);
+            try {
+                \Illuminate\Support\Facades\Mail::to($request->email)->send(
+                    new \App\Mail\FitAccessNotificationMail(
+                        recipientName: 'Test User',
+                        emailSubject:  'FitAccess Mail Test',
+                        heading:       'Mail is Working',
+                        message:       'If you received this email, the mail configuration on the server is working correctly.',
+                        buttonText:    'Go to FitAccess',
+                        color:         '#22c55e',
+                    )
+                );
+                return response()->json(['success' => true, 'message' => 'Test email sent to ' . $request->email]);
+            } catch (\Throwable $e) {
+                return response()->json([
+                    'success' => false,
+                    'error'   => $e->getMessage(),
+                    'class'   => get_class($e),
+                    'config'  => [
+                        'mailer'   => config('mail.default'),
+                        'host'     => config('mail.mailers.smtp.host'),
+                        'port'     => config('mail.mailers.smtp.port'),
+                        'from'     => config('mail.from.address'),
+                        'queue'    => config('queue.default'),
+                    ],
+                ], 500);
+            }
+        });
 
         // ── Admin Team & Permissions ──────────────────────────────────
         Route::prefix('admin/team')->group(function () {
@@ -173,6 +313,7 @@ Route::prefix('v1')->group(function () {
 
         // Partner Applications
         Route::get('partner-applications',                              [PartnerApplicationController::class, 'index']);
+        Route::post('partner-applications/{partnerApplication}/approve', [PartnerApplicationController::class, 'approve']);
         Route::post('partner-applications/{partnerApplication}/approve',[PartnerApplicationController::class, 'approve']);
         Route::post('partner-applications/{partnerApplication}/reject', [PartnerApplicationController::class, 'reject']);
 
@@ -214,6 +355,7 @@ Route::prefix('v1')->group(function () {
 
         // ── Employee portal ────────────────────────────────────────
         Route::prefix('employee')->group(function () {
+            Route::get('dashboard', [EmployeePortalController::class, 'dashboard']);
             Route::get('dashboard',     [EmployeePortalController::class, 'dashboard']);
             Route::get('checkin-token', [CheckinController::class, 'token']);
             Route::get('gyms',          [CheckinController::class, 'myGyms']);
@@ -222,6 +364,7 @@ Route::prefix('v1')->group(function () {
 
         // ── Partner / Gym portal ───────────────────────────────────
         Route::prefix('partner')->group(function () {
+            Route::get('dashboard', [PartnerPortalController::class, 'dashboard']);
             Route::get('dashboard',                       [PartnerPortalController::class, 'dashboard']);
             Route::get('expected-visitors',               [CheckinController::class, 'expectedVisitors']);
             Route::put('profile',                         [GymUpgradeController::class, 'updateProfile']);

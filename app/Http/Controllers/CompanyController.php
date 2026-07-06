@@ -169,6 +169,7 @@ class CompanyController extends Controller
 
         unset($data['business_license']);
 
+        $company->update($data);
         $old = $company->only(array_keys($data));
         $company->update($data);
         AuditLog::record('updated', $company, $old, $data);
@@ -224,14 +225,44 @@ class CompanyController extends Controller
             $company->hrUser?->update(['is_active' => true]);
         }
 
-        // Telegram notification to HR user
+        // Telegram + email notification (wrapped so failures never break the response)
         $hrUser = $company->hrUser;
+        $reason = $request->reason ?? null;
         if ($hrUser) {
-            $telegram = app(TelegramService::class);
-            if ($isApproved) {
-                $telegram->notifyUserApproved($hrUser, 'company');
-            } else {
-                $telegram->notifyUserRejected($hrUser, 'company', $request->reason ?? null);
+            // Email first — own try-catch so Telegram failure can't block it
+            if ($hrUser->email) {
+                try {
+                    if ($isApproved) {
+                        \Illuminate\Support\Facades\Mail::to($hrUser->email)
+                            ->send(new \App\Mail\AccountApprovedMail($hrUser));
+                    } else {
+                        \Illuminate\Support\Facades\Mail::to($hrUser->email)->send(
+                            new \App\Mail\FitAccessNotificationMail(
+                                recipientName: $hrUser->name,
+                                emailSubject:  'Your FitAccess Company Registration Was Not Approved',
+                                heading:       'Business Licence Not Approved',
+                                message:       "We regret to inform you that your company registration for {$company->name} was not approved."
+                                              . ($reason ? "\n\nReason: {$reason}" : '')
+                                              . "\n\nYou may re-apply with the correct documents or contact FitAccess support.",
+                                buttonText:    'Contact Support',
+                                color:         '#ef4444',
+                            )
+                        );
+                    }
+                } catch (\Throwable $e) {
+                    \Illuminate\Support\Facades\Log::error('Company licence email failed: ' . $e->getMessage());
+                }
+            }
+            // Telegram separately
+            try {
+                $telegram = app(TelegramService::class);
+                if ($isApproved) {
+                    $telegram->notifyUserApproved($hrUser, 'company');
+                } else {
+                    $telegram->notifyUserRejected($hrUser, 'company', $reason);
+                }
+            } catch (\Throwable $e) {
+                \Illuminate\Support\Facades\Log::error('Company licence Telegram failed: ' . $e->getMessage());
             }
         }
 

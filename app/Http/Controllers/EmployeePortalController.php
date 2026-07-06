@@ -42,26 +42,30 @@ class EmployeePortalController extends Controller
 
         $planKey  = $myPlan?->tier  ?? $fallbackTier;
         $planName = $myPlan?->name  ?? ucfirst(str_replace('_', ' ', $planKey));
+        $planFee  = (float) ($myPlan?->monthly_fee_etb ?? 0);
 
-        // Tier hierarchy: higher rank includes all lower tiers
-        // Only standard tiers are included — custom/test plans are excluded from gym access
-        $tierRank = ['basic' => 0, 'basic_plus' => 1, 'premium' => 2, 'platinum' => 3];
-        $myRank   = $tierRank[$planKey] ?? 0;
-
-        $accessibleTiers = array_keys(array_filter(
-            $tierRank,
-            fn($rank) => $rank <= $myRank
-        ));
-
-        // Fallback for unrecognised tier keys
-        if (empty($accessibleTiers)) {
-            $accessibleTiers = [$planKey];
-        }
-
-        // Fetch active plans to build labels (only standard tiers)
+        // Accessible tiers: all active plans whose fee ≤ employee's plan fee
         $allActivePlans = MembershipPlan::where('is_active', true)->orderBy('monthly_fee_etb')->get();
 
+        $accessibleTiers = $allActivePlans
+            ->filter(fn($p) => (float)$p->monthly_fee_etb <= $planFee)
+            ->pluck('tier')
+            ->push($planKey)          // always include own tier
+            ->unique()
+            ->values()
+            ->toArray();
+
+        // Fallback if no plans exist in DB yet
+        if (empty($accessibleTiers)) {
+            $accessibleTiers = match($planKey) {
+                'platinum'   => ['basic', 'basic_plus', 'premium', 'platinum'],
+                'basic_plus' => ['basic', 'basic_plus'],
+                default      => [$planKey],
+            };
+        }
+
         // Accessible plan names (only the standard tiers that match)
+        $tierRank = ['basic' => 0, 'basic_plus' => 1, 'premium' => 2, 'platinum' => 3];
         $accessiblePlanLabels = $allActivePlans
             ->filter(fn($p) => in_array($p->tier, $accessibleTiers) && isset($tierRank[$p->tier]))
             ->mapWithKeys(fn($p) => [$p->tier => $p->name])

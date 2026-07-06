@@ -11,6 +11,7 @@ use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Facades\Mail;
 
 class TelegramController extends Controller
 {
@@ -259,6 +260,10 @@ class TelegramController extends Controller
                     $company->update(['business_license_status' => 'approved', 'is_active' => true]);
                     $company->hrUser?->update(['is_active' => true]);
                     $this->telegram->notifyUserApproved($company->hrUser, 'company');
+                    if ($company->hrUser?->email) {
+                        Mail::to($company->hrUser->email)
+                            ->send(new \App\Mail\AccountApprovedMail($company->hrUser));
+                    }
                     $this->telegram->answerCallbackQuery($callbackId, '✅ Company approved!');
                     $this->telegram->editMessageText($chatId, $messageId,
                         "✅ <b>Company approved</b> by {$actor->name}.\n<b>{$company->name}</b> is now active."
@@ -277,6 +282,18 @@ class TelegramController extends Controller
                     }
                     $company->update(['business_license_status' => 'rejected']);
                     $this->telegram->notifyUserRejected($company->hrUser, 'company');
+                    if ($company->hrUser?->email) {
+                        Mail::to($company->hrUser->email)->send(
+                            new \App\Mail\FitAccessNotificationMail(
+                                recipientName: $company->hrUser->name,
+                                emailSubject:  'Your FitAccess Company Registration Was Not Approved',
+                                heading:       'Business Licence Not Approved',
+                                message:       "Your company registration for {$company->name} was not approved.\n\nPlease contact FitAccess support for assistance.",
+                                buttonText:    'Contact Support',
+                                color:         '#ef4444',
+                            )
+                        );
+                    }
                     $this->telegram->answerCallbackQuery($callbackId, '❌ Company rejected.');
                     $this->telegram->editMessageText($chatId, $messageId,
                         "❌ <b>Company rejected</b> by {$actor->name}.\n<b>{$company->name}</b>"
@@ -288,18 +305,62 @@ class TelegramController extends Controller
                         $this->telegram->answerCallbackQuery($callbackId, '⛔ Insufficient permissions.', true);
                         return;
                     }
-                    $employee = Employee::with('user')->findOrFail($id);
-                    if ($isHR && $employee->registration_status !== 'pending') {
-                        $this->telegram->answerCallbackQuery($callbackId, 'Already processed.', true);
+                    $employee = Employee::with('user', 'company')->findOrFail($id);
+
+                    // HR: already approved via portal — show friendly status, don't block
+                    if ($isHR && $employee->registration_status === 'approved') {
+                        $status = $employee->admin_approval_status === 'approved'
+                            ? '✅ Fully activated — admin already confirmed.'
+                            : '✅ Already HR-approved — waiting for admin confirmation.';
+                        $this->telegram->answerCallbackQuery($callbackId, $status, false);
+                        $this->telegram->editMessageText($chatId, $messageId,
+                            "✅ <b>{$employee->user?->name}</b> — already approved by HR.\n⏳ Awaiting admin final confirmation."
+                        );
                         return;
                     }
+                    // HR: already rejected
+                    if ($isHR && $employee->registration_status === 'rejected') {
+                        $this->telegram->answerCallbackQuery($callbackId, '❌ Already rejected.', false);
+                        return;
+                    }
+                    // Admin: already admin-approved
+                    if ($isAdmin && $employee->admin_approval_status === 'approved') {
+                        $this->telegram->answerCallbackQuery($callbackId, '✅ Already fully approved.', false);
+                        return;
+                    }
+
                     if ($isHR) {
                         $employee->update(['registration_status' => 'approved', 'admin_approval_status' => 'pending']);
-                        $this->telegram->notifyUserApproved($employee->user, 'hr_approved');
+                        try {
+                            $this->telegram->notifyUserApproved($employee->user, 'hr_approved');
+                            if ($employee->user?->email) {
+                                Mail::to($employee->user->email)->send(
+                                    new \App\Mail\FitAccessNotificationMail(
+                                        recipientName: $employee->user->name,
+                                        emailSubject:  'Your FitAccess Registration Has Been Approved by HR',
+                                        heading:       'HR Approval Confirmed',
+                                        message:       "Your employee registration with " . ($employee->company?->name ?? 'your company') . " has been approved by HR.\n\nYour account is now pending final admin review. You will be notified once fully activated.",
+                                        buttonText:    'Check Your Status',
+                                        color:         '#f59e0b',
+                                    )
+                                );
+                            }
+                        } catch (\Throwable $e) {
+                            Log::error('Telegram HR approve notification failed: ' . $e->getMessage());
+                        }
                     } else {
                         $employee->update(['admin_approval_status' => 'approved', 'is_enrolled' => true]);
                         $employee->user?->update(['is_active' => true]);
-                        $this->telegram->notifyUserApproved($employee->user, 'employee');
+                        try {
+                            $this->telegram->notifyUserApproved($employee->user, 'employee');
+                            $this->telegram->notifyHREmployeeApprovedByAdmin($employee);
+                            if ($employee->user?->email) {
+                                Mail::to($employee->user->email)
+                                    ->send(new \App\Mail\AccountApprovedMail($employee->user));
+                            }
+                        } catch (\Throwable $e) {
+                            Log::error('Telegram admin approve notification failed: ' . $e->getMessage());
+                        }
                     }
                     $this->telegram->answerCallbackQuery($callbackId, '✅ Employee approved!');
                     $this->telegram->editMessageText($chatId, $messageId,
@@ -312,10 +373,31 @@ class TelegramController extends Controller
                         $this->telegram->answerCallbackQuery($callbackId, '⛔ Insufficient permissions.', true);
                         return;
                     }
-                    $employee = Employee::with('user')->findOrFail($id);
+                    $employee = Employee::with('user', 'company')->findOrFail($id);
+                    if ($employee->registration_status === 'rejected') {
+                        $this->telegram->answerCallbackQuery($callbackId, '❌ Already rejected.', false);
+                        return;
+                    }
                     $employee->update(['registration_status' => 'rejected']);
                     $employee->user?->update(['is_active' => false]);
-                    $this->telegram->notifyUserRejected($employee->user, 'employee');
+                    try {
+                        $this->telegram->notifyUserRejected($employee->user, 'employee');
+                        $this->telegram->notifyHREmployeeRejectedByAdmin($employee);
+                        if ($employee->user?->email) {
+                            Mail::to($employee->user->email)->send(
+                                new \App\Mail\FitAccessNotificationMail(
+                                    recipientName: $employee->user->name,
+                                    emailSubject:  'Your FitAccess Account Application Was Not Approved',
+                                    heading:       'Account Not Approved',
+                                    message:       "Your FitAccess employee account was not approved.\n\nPlease contact your HR team or FitAccess support for assistance.",
+                                    buttonText:    'Contact Support',
+                                    color:         '#ef4444',
+                                )
+                            );
+                        }
+                    } catch (\Throwable $e) {
+                        Log::error('Telegram reject_emp notification failed: ' . $e->getMessage());
+                    }
                     $this->telegram->answerCallbackQuery($callbackId, '❌ Employee rejected.');
                     $this->telegram->editMessageText($chatId, $messageId,
                         "❌ <b>Employee rejected</b> by {$actor->name}.\n<b>{$employee->user?->name}</b>"
@@ -353,6 +435,10 @@ class TelegramController extends Controller
                         $app->user?->update(['is_active' => true]);
                     });
                     $this->telegram->notifyUserApproved($app->user, 'partner');
+                    if ($app->user?->email) {
+                        Mail::to($app->user->email)
+                            ->send(new \App\Mail\AccountApprovedMail($app->user));
+                    }
                     $this->telegram->answerCallbackQuery($callbackId, '✅ Gym approved (tier: basic)!');
                     $this->telegram->editMessageText($chatId, $messageId,
                         "✅ <b>Gym approved</b> by {$actor->name}.\n<b>{$app->facility_name}</b> (tier: basic)\n\n"
@@ -373,6 +459,18 @@ class TelegramController extends Controller
                     $app->update(['status' => 'rejected']);
                     $app->user?->update(['is_active' => false]);
                     $this->telegram->notifyUserRejected($app->user, 'partner');
+                    if ($app->user?->email) {
+                        Mail::to($app->user->email)->send(
+                            new \App\Mail\FitAccessNotificationMail(
+                                recipientName: $app->user->name,
+                                emailSubject:  'Your FitAccess Gym Partner Application Was Not Approved',
+                                heading:       'Application Not Approved',
+                                message:       "Your gym partner application for {$app->facility_name} was not approved.\n\nPlease contact FitAccess support for assistance.",
+                                buttonText:    'Contact Support',
+                                color:         '#ef4444',
+                            )
+                        );
+                    }
                     $this->telegram->answerCallbackQuery($callbackId, '❌ Gym rejected.');
                     $this->telegram->editMessageText($chatId, $messageId,
                         "❌ <b>Gym rejected</b> by {$actor->name}.\n<b>{$app->facility_name}</b>"

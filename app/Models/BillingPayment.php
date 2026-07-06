@@ -17,6 +17,8 @@ class BillingPayment extends Model
     ];
 
     protected $casts = [
+        'submitted_at' => 'datetime',
+        'verified_at'  => 'datetime',
         'submitted_at'      => 'datetime',
         'verified_at'       => 'datetime',
         'chapa_verified_at' => 'datetime',

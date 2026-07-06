@@ -10,6 +10,7 @@ use App\Models\Employee;
 use App\Models\MembershipPlan;
 use App\Models\User;
 use App\Services\MembershipService;
+use App\Services\TelegramService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
@@ -19,6 +20,7 @@ class AdminBillingController extends Controller
 {
     /* ── Helpers ──────────────────────────────────────────────── */
 
+    /** Map employee level to its plan tier key. */
     /** Map employee level to its canonical tier key. */
     private function levelToTier(string $level): string
     {
@@ -105,7 +107,7 @@ class AdminBillingController extends Controller
             'billing_period' => 'required|string|max:30',
             'due_date'       => 'nullable|date',
             'notes'          => 'nullable|string|max:1000',
-            'employee_id'    => 'nullable|exists:employees,id',   // optional: single-employee invoice
+            'employee_id'    => 'nullable|exists:employees,id',
         ]);
 
         $company   = Company::findOrFail($request->company_id);
@@ -222,6 +224,12 @@ class AdminBillingController extends Controller
             'sent_at' => now(),
         ]);
 
+        try {
+            app(TelegramService::class)->notifyCompanyInvoiceSent($billingInvoice);
+        } catch (\Throwable $e) {
+            \Illuminate\Support\Facades\Log::error('Invoice sent Telegram failed: ' . $e->getMessage());
+        }
+
         return response()->json(['message' => 'Invoice sent to company.', 'invoice' => $this->formatInvoice($billingInvoice)]);
     }
 
@@ -265,7 +273,7 @@ class AdminBillingController extends Controller
             'notes' => 'nullable|string|max:500',
         ]);
 
-        return DB::transaction(function () use ($request, $billingPayment): JsonResponse {
+        $result = DB::transaction(function () use ($request, $billingPayment): array {
             // Mark payment as verified
             $billingPayment->update([
                 'status'      => 'verified',
@@ -280,22 +288,31 @@ class AdminBillingController extends Controller
                 'paid_at' => now(),
             ]);
 
-            // Provision gym memberships (payment_status = 'paid') for all
-            // enrolled + approved employees of this company.
-            // This is the ONLY place where memberships are created — never at
-            // employee approval time, always at invoice-payment verification.
-            $result = MembershipService::provisionForCompany($billingPayment->company_id);
+            // Mark all enrolled employees of this company as paid
+            Employee::where('company_id', $billingPayment->company_id)
+                ->where('is_enrolled', true)
+                ->where('registration_status', 'approved')
+                ->update(['payment_status' => 'paid']);
 
-            return response()->json([
-                'message' => sprintf(
-                    'Payment verified. %d employee(s) are now marked as paid and %d gym membership(s) have been activated.',
-                    $result['employees'],
-                    $result['memberships']
-                ),
-                'employees_updated'   => $result['employees'],
-                'memberships_created' => $result['memberships'],
-            ]);
+            return MembershipService::provisionForCompany($billingPayment->company_id);
         });
+
+        try {
+            $billingPayment->loadMissing('invoice');
+            app(TelegramService::class)->notifyCompanyPaymentVerified($billingPayment);
+        } catch (\Throwable $e) {
+            \Illuminate\Support\Facades\Log::error('Payment verified Telegram failed: ' . $e->getMessage());
+        }
+
+        return response()->json([
+            'message' => sprintf(
+                'Payment verified. %d employee(s) are now marked as paid and %d gym membership(s) have been activated.',
+                $result['employees'],
+                $result['memberships']
+            ),
+            'employees_updated'   => $result['employees'],
+            'memberships_created' => $result['memberships'],
+        ]);
     }
 
     /* ── Reject payment ───────────────────────────────────────── */
@@ -319,6 +336,13 @@ class AdminBillingController extends Controller
 
         // Revert invoice back to sent so company can resubmit
         $billingPayment->invoice->update(['status' => 'sent']);
+
+        try {
+            $billingPayment->loadMissing('invoice');
+            app(TelegramService::class)->notifyCompanyPaymentRejected($billingPayment, $request->notes);
+        } catch (\Throwable $e) {
+            \Illuminate\Support\Facades\Log::error('Payment rejected Telegram failed: ' . $e->getMessage());
+        }
 
         return response()->json(['message' => 'Payment rejected. Company notified to resubmit.']);
     }
@@ -494,7 +518,7 @@ class AdminBillingController extends Controller
             'payment_method_bank'          => $p->payment_method_bank,
             'payment_method_account_name'  => $p->payment_method_account_name,
             'payment_method_account_number'=> $p->payment_method_account_number,
-            'receipt_path'                 => $p->receipt_path ? Storage::disk('public')->url($p->receipt_path) : null,
+            'receipt_path'                 => $p->receipt_path ? url('/api/v1/files/' . ltrim($p->receipt_path, '/')) : null,
             'status'                       => $p->status,
             'submitted_at'                 => $p->submitted_at?->toDateTimeString(),
             'verified_at'                  => $p->verified_at?->toDateTimeString(),
