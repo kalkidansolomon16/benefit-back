@@ -28,7 +28,7 @@ class PartnerApplicationController extends Controller
                 'contact_email'          => $a->contact_email,
                 'tin_number'             => $a->tin_number,
                 'business_license_url'   => $a->business_license_path
-                    ? asset('storage/' . $a->business_license_path)
+                    ? url('/api/v1/files/' . ltrim($a->business_license_path, '/'))
                     : null,
                 'city'                   => $a->city,
                 'sub_city'               => $a->sub_city,
@@ -84,15 +84,15 @@ class PartnerApplicationController extends Controller
             default                                                        => 'basic',
         };
 
-        return DB::transaction(function () use ($request, $partnerApplication, $canonicalTier): JsonResponse {
+        $gym = null;
 
-            // Build address from woreda + landmark
+        DB::transaction(function () use ($partnerApplication, $canonicalTier, &$gym) {
+
             $address = $partnerApplication->woreda;
             if ($partnerApplication->landmark) {
                 $address .= ', ' . $partnerApplication->landmark;
             }
 
-            // Build opening_hours JSON
             $openingHours = [
                 'weekdays' => $partnerApplication->weekday_open && $partnerApplication->weekday_close
                     ? $partnerApplication->weekday_open . '–' . $partnerApplication->weekday_close
@@ -103,43 +103,47 @@ class PartnerApplicationController extends Controller
                 'summary'  => $partnerApplication->operating_hours_summary,
             ];
 
-            // Create the Gym record
             $gym = Gym::create([
-                'name'            => $partnerApplication->facility_name,
-                'contact_person'  => $partnerApplication->contact_person,
-                'contact_phone'   => $partnerApplication->contact_phone,
-                'contact_email'   => $partnerApplication->contact_email,
-                'address'         => $address,
-                'sub_city'        => $partnerApplication->sub_city,
-                'city'            => $partnerApplication->city,
-                'tier'            => $canonicalTier,
-                'max_capacity'    => $partnerApplication->max_capacity,
-                'facilities'      => array_merge(
-                    $partnerApplication->categories ?? [],
-                    $partnerApplication->amenities  ?? []
-                ),
-                'opening_hours'   => $openingHours,
-                'is_active'       => true,
-                'is_partner'      => true,
+                'name'              => $partnerApplication->facility_name,
+                'contact_person'    => $partnerApplication->contact_person,
+                'contact_phone'     => $partnerApplication->contact_phone,
+                'contact_email'     => $partnerApplication->contact_email,
+                'address'           => $address,
+                'sub_city'          => $partnerApplication->sub_city,
+                'city'              => $partnerApplication->city,
+                'tier'              => $canonicalTier,
+                'max_capacity'      => $partnerApplication->max_capacity,
+                'facilities'        => array_merge($partnerApplication->categories ?? [], $partnerApplication->amenities ?? []),
+                'opening_hours'     => $openingHours,
+                'is_active'         => true,
+                'is_partner'        => true,
                 'partnership_start' => now()->toDateString(),
             ]);
 
-            // Update application status
             $partnerApplication->update(['status' => 'approved']);
-
-            // Activate the partner user account
-            $partnerApplication->user?->update(['is_active' => true]);
-
-            // Telegram notification to partner
-            if ($partnerApplication->user) {
-                app(TelegramService::class)->notifyUserApproved($partnerApplication->user, 'partner');
-            }
-
-            return response()->json([
-                'message' => "Partner approved. Gym \"{$gym->name}\" is now live.",
-                'gym_id'  => $gym->id,
-            ]);
+            $partnerApplication->user()->update(['is_active' => true]);
         });
+
+        // Send notifications AFTER transaction so DB changes are committed
+        $partnerUser = $partnerApplication->user()->first();
+        if ($partnerUser) {
+            try {
+                \Illuminate\Support\Facades\Mail::to($partnerUser->email)
+                    ->send(new \App\Mail\AccountApprovedMail($partnerUser));
+            } catch (\Throwable $e) {
+                \Illuminate\Support\Facades\Log::error('Partner approval email failed: ' . $e->getMessage());
+            }
+            try {
+                app(TelegramService::class)->notifyUserApproved($partnerUser, 'partner');
+            } catch (\Throwable $e) {
+                \Illuminate\Support\Facades\Log::error('Partner approval Telegram failed: ' . $e->getMessage());
+            }
+        }
+
+        return response()->json([
+            'message' => "Partner approved. Gym \"{$gym->name}\" is now live.",
+            'gym_id'  => $gym->id,
+        ]);
     }
 
     /* ── Reject ────────────────────────────────────────────── */
@@ -161,9 +165,25 @@ class PartnerApplicationController extends Controller
 
         $partnerApplication->user?->update(['is_active' => false]);
 
-        // Telegram notification to partner
-        if ($partnerApplication->user) {
-            app(TelegramService::class)->notifyUserRejected($partnerApplication->user, 'partner', $request->reason);
+        try {
+            if ($partnerApplication->user) {
+                $reason = $request->reason;
+                app(TelegramService::class)->notifyUserRejected($partnerApplication->user, 'partner', $reason);
+                \Illuminate\Support\Facades\Mail::to($partnerApplication->user->email)->send(
+                    new \App\Mail\FitAccessNotificationMail(
+                        recipientName: $partnerApplication->user->name,
+                        emailSubject:  'Your FitAccess Gym Partner Application Was Not Approved',
+                        heading:       'Application Not Approved',
+                        message:       "We regret to inform you that your gym partner application for {$partnerApplication->facility_name} was not approved."
+                                      . ($reason ? "\n\nReason: {$reason}" : '')
+                                      . "\n\nIf you have questions, please contact FitAccess support.",
+                        buttonText:    'Contact Support',
+                        color:         '#ef4444',
+                    )
+                );
+            }
+        } catch (\Throwable $e) {
+            \Illuminate\Support\Facades\Log::error('Partner rejection notification failed: ' . $e->getMessage());
         }
 
         return response()->json(['message' => 'Application rejected.']);

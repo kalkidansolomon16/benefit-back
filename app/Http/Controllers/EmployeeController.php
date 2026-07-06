@@ -109,6 +109,27 @@ class EmployeeController extends Controller
 
         AuditLog::record('updated', $employee, ['user_is_active' => !$newState], ['user_is_active' => $newState]);
 
+        if ($newState && $user->email) {
+            try {
+                \Illuminate\Support\Facades\Mail::to($user->email)
+                    ->send(new \App\Mail\AccountApprovedMail($user));
+            } catch (\Throwable $e) {
+                \Illuminate\Support\Facades\Log::error('Employee activate email failed: ' . $e->getMessage());
+            }
+        }
+
+        try {
+            $telegram = app(TelegramService::class);
+            if ($newState) {
+                $telegram->notifyUserApproved($user, 'employee');
+                $telegram->notifyHREmployeeApprovedByAdmin($employee->load('company'));
+            } else {
+                $telegram->notifyUserDeactivated($user);
+            }
+        } catch (\Throwable $e) {
+            \Illuminate\Support\Facades\Log::error('Employee toggle-active Telegram failed: ' . $e->getMessage());
+        }
+
         return response()->json([
             'message'        => $newState ? 'Employee account activated.' : 'Employee account deactivated.',
             'user_is_active' => $newState,
@@ -182,8 +203,26 @@ class EmployeeController extends Controller
             'payment_status'        => $request->payment_status,
         ]);
 
-        // Telegram notification
-        app(TelegramService::class)->notifyUserApproved($employee->user, 'employee');
+        // Email first — most critical, must not be blocked by Telegram
+        if ($employee->user?->email) {
+            try {
+                \Illuminate\Support\Facades\Log::info('[FitAccess] Sending approval email to: ' . $employee->user->email . ' | mailer: ' . config('mail.default') . ' | host: ' . config('mail.mailers.smtp.host'));
+                \Illuminate\Support\Facades\Mail::to($employee->user->email)
+                    ->send(new \App\Mail\AccountApprovedMail($employee->user));
+                \Illuminate\Support\Facades\Log::info('[FitAccess] Approval email sent OK to: ' . $employee->user->email);
+            } catch (\Throwable $e) {
+                \Illuminate\Support\Facades\Log::error('[FitAccess] Employee approval email FAILED [' . get_class($e) . ']: ' . $e->getMessage());
+            }
+        }
+
+        // Telegram separately — failure must never affect the email above
+        try {
+            $telegram = app(TelegramService::class);
+            $telegram->notifyUserApproved($employee->user, 'employee');
+            $telegram->notifyHREmployeeApprovedByAdmin($employee->load('company'));
+        } catch (\Throwable $e) {
+            \Illuminate\Support\Facades\Log::error('Employee approval Telegram failed: ' . $e->getMessage());
+        }
 
         return response()->json([
             'message' => 'Employee approved by admin. Account is now active.',
@@ -206,8 +245,34 @@ class EmployeeController extends Controller
             'admin_approval_status' => 'rejected',
         ]);
 
-        // Telegram notification
-        app(TelegramService::class)->notifyUserRejected($employee->user, 'employee', $request->reason ?? null);
+        $reason = $request->reason ?? null;
+
+        if ($employee->user?->email) {
+            try {
+                \Illuminate\Support\Facades\Mail::to($employee->user->email)->send(
+                    new \App\Mail\FitAccessNotificationMail(
+                        recipientName: $employee->user->name,
+                        emailSubject:  'Your FitAccess Account Application Was Not Approved',
+                        heading:       'Account Not Approved',
+                        message:       "We regret to inform you that your FitAccess employee account was not approved at the admin review stage."
+                                      . ($reason ? "\n\nReason: {$reason}" : '')
+                                      . "\n\nPlease contact your HR team or FitAccess support for assistance.",
+                        buttonText:    'Contact Support',
+                        color:         '#ef4444',
+                    )
+                );
+            } catch (\Throwable $e) {
+                \Illuminate\Support\Facades\Log::error('Employee rejection email failed: ' . $e->getMessage());
+            }
+        }
+
+        try {
+            $telegram = app(TelegramService::class);
+            $telegram->notifyUserRejected($employee->user, 'employee', $reason);
+            $telegram->notifyHREmployeeRejectedByAdmin($employee->load('company'), $reason);
+        } catch (\Throwable $e) {
+            \Illuminate\Support\Facades\Log::error('Employee rejection Telegram failed: ' . $e->getMessage());
+        }
 
         return response()->json(['message' => 'Employee rejected at admin stage.']);
     }

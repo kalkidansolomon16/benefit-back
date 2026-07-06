@@ -16,9 +16,40 @@ use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Hash;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Validation\ValidationException;
+use OpenApi\Attributes as OA;
 
 class AuthController extends Controller
 {
+    #[OA\Post(
+        path: '/auth/login',
+        tags: ['Auth'],
+        summary: 'Login',
+        description: 'Authenticate a user and return a Bearer token',
+        requestBody: new OA\RequestBody(
+            required: true,
+            content: new OA\JsonContent(
+                required: ['email', 'password'],
+                properties: [
+                    new OA\Property(property: 'email', type: 'string', format: 'email', example: 'admin@fitaccess.com'),
+                    new OA\Property(property: 'password', type: 'string', format: 'password', example: 'password'),
+                ]
+            )
+        ),
+        responses: [
+            new OA\Response(
+                response: 200,
+                description: 'Login successful',
+                content: new OA\JsonContent(
+                    properties: [
+                        new OA\Property(property: 'token', type: 'string'),
+                        new OA\Property(property: 'user', type: 'object'),
+                    ]
+                )
+            ),
+            new OA\Response(response: 403, description: 'Account inactive or banned'),
+            new OA\Response(response: 422, description: 'Invalid credentials'),
+        ]
+    )]
     public function login(Request $request): JsonResponse
     {
         $request->validate([
@@ -77,14 +108,15 @@ class AuthController extends Controller
         }
 
         return response()->json([
-        'user'  => array_merge((new UserResource($user))->toArray($request), [
-        'member_code'          => $user->member_code,
-        'must_change_password' => $user->must_change_password ?? false,
-        'gym_staff_role'       => $gymStaff?->role,
-        'gym_id'               => $gymStaff?->gym_id,
+            'user'  => array_merge((new UserResource($user))->toArray($request), [
+                'member_code'          => $user->member_code,
+                'must_change_password' => ($user->must_change_password ?? false) || ($user->must_reset_password ?? false),
+                'gym_staff_role'       => $gymStaff?->role,
+                'gym_id'               => $gymStaff?->gym_id,
             ]),
-            'token' => $token,
-            ]);
+            'token'       => $token,
+            'permissions' => $user->effectivePermissions(),
+        ]);
     }
 
     public function logout(Request $request): JsonResponse
@@ -136,10 +168,9 @@ class AuthController extends Controller
         $licensePath = $request->file('business_license')
             ->store('licenses', 'public');
 
+        $result = null;
         try {
-            return DB::transaction(function () use ($request, $licensePath): JsonResponse {
-
-                // 1. Create the company record
+            $result = DB::transaction(function () use ($request, $licensePath): array {
                 $company = Company::create([
                     'name'                    => $request->company_name,
                     'industry'                => $this->mapIndustry($request->industry),
@@ -154,8 +185,7 @@ class AuthController extends Controller
                     'is_active'                => false,
                 ]);
 
-                // 2. Create the HR user account
-                $user = User::create([
+                $user  = User::create([
                     'name'      => $request->contact_name,
                     'email'     => $request->email,
                     'password'  => Hash::make($request->password),
@@ -164,24 +194,28 @@ class AuthController extends Controller
                     'is_active' => false,
                 ]);
 
-                // 3. Issue a Sanctum token
                 $token = $user->createToken('fitaccess-token')->plainTextToken;
 
-                // Notify admins via Telegram
-                app(TelegramService::class)->notifyAdminsNewCompany($company, $user);
-
-                return response()->json([
-                    'message' => 'Registration submitted. Your account will be activated after licence review (2–3 business days).',
-                    'user'    => new UserResource($user),
-                    'company' => new CompanyResource($company),
-                    'token'   => $token,
-                ], 201);
+                return compact('company', 'user', 'token');
             });
         } catch (\Throwable $e) {
-            // If anything fails, delete the uploaded file so no orphans are left on disk
             Storage::disk('public')->delete($licensePath);
             throw $e;
         }
+
+        // Notify AFTER transaction so a Telegram failure never rolls back registration
+        try {
+            app(TelegramService::class)->notifyAdminsNewCompany($result['company'], $result['user']);
+        } catch (\Throwable $e) {
+            \Illuminate\Support\Facades\Log::error('Company registration Telegram notification failed: ' . $e->getMessage());
+        }
+
+        return response()->json([
+            'message' => 'Registration submitted. Your account will be activated after licence review (2–3 business days).',
+            'user'    => new UserResource($result['user']),
+            'company' => new CompanyResource($result['company']),
+            'token'   => $result['token'],
+        ], 201);
     }
 
     /**
@@ -216,7 +250,7 @@ class AuthController extends Controller
 
         $fullName = trim("{$request->first_name} {$request->fathers_name} {$request->grandfathers_name}");
 
-        return DB::transaction(function () use ($request, $fullName): JsonResponse {
+        $employee = DB::transaction(function () use ($request, $fullName): Employee {
             $user = User::create([
                 'name'       => $fullName,
                 'email'      => $request->email,
@@ -224,10 +258,10 @@ class AuthController extends Controller
                 'role'       => 'employee',
                 'phone'      => $request->phone,
                 'fan_number' => $request->staff_id,
-                'is_active'  => false, // pending HR approval
+                'is_active'  => false,
             ]);
 
-            $employee = Employee::create([
+            return Employee::create([
                 'user_id'               => $user->id,
                 'company_id'            => $request->company_id,
                 'fan_number'            => $request->staff_id,
@@ -236,18 +270,22 @@ class AuthController extends Controller
                 'branch'                => $request->branch,
                 'level'                 => 'staff',
                 'request_note'          => $request->request_note,
-                'registration_status'   => 'pending',   // awaiting HR approval
-                'admin_approval_status' => 'pending',   // awaiting admin approval
+                'registration_status'   => 'pending',
+                'admin_approval_status' => 'pending',
                 'is_enrolled'           => false,
             ]);
-
-            // Notify HR & admins via Telegram
-            app(TelegramService::class)->notifyHRNewEmployee($employee->load('user', 'company'));
-
-            return response()->json([
-                'message' => 'Your application has been submitted! Your HR team will review and activate your account.',
-            ], 201);
         });
+
+        // Notify AFTER transaction so a Telegram failure never rolls back the registration
+        try {
+            app(TelegramService::class)->notifyHRNewEmployee($employee->load('user', 'company'));
+        } catch (\Throwable $e) {
+            \Illuminate\Support\Facades\Log::error('Employee registration Telegram notification failed: ' . $e->getMessage());
+        }
+
+        return response()->json([
+            'message' => 'Your application has been submitted! Your HR team will review and activate your account.',
+        ], 201);
     }
 
     /**
@@ -299,10 +337,9 @@ class AuthController extends Controller
                 ->store('partner-licenses', 'public');
         }
 
+        $partnerApplication = null;
         try {
-            return DB::transaction(function () use ($request, $categories, $amenities, $licensePath): JsonResponse {
-
-                // 1. Create User account (inactive until approved by admin)
+            $partnerApplication = DB::transaction(function () use ($request, $categories, $amenities, $licensePath): PartnerApplication {
                 $user = User::create([
                     'name'      => $request->contact_person,
                     'email'     => $request->contact_email,
@@ -312,8 +349,7 @@ class AuthController extends Controller
                     'is_active' => false,
                 ]);
 
-                // 2. Store the partner application
-                $partnerApplication = PartnerApplication::create([
+                return PartnerApplication::create([
                     'user_id'                 => $user->id,
                     'facility_name'           => $request->facility_name,
                     'categories'              => $categories,
@@ -336,13 +372,6 @@ class AuthController extends Controller
                     'amenities'               => $amenities,
                     'status'                  => 'pending',
                 ]);
-
-                // Notify admins via Telegram
-                app(TelegramService::class)->notifyAdminsNewPartner($partnerApplication);
-
-                return response()->json([
-                    'message' => 'Partner application submitted! Our team will review it within 2–3 business days.',
-                ], 201);
             });
         } catch (\Throwable $e) {
             if ($licensePath) {
@@ -350,6 +379,17 @@ class AuthController extends Controller
             }
             throw $e;
         }
+
+        // Notify AFTER transaction so a Telegram failure never rolls back registration
+        try {
+            app(TelegramService::class)->notifyAdminsNewPartner($partnerApplication);
+        } catch (\Throwable $e) {
+            \Illuminate\Support\Facades\Log::error('Partner registration Telegram notification failed: ' . $e->getMessage());
+        }
+
+        return response()->json([
+            'message' => 'Partner application submitted! Our team will review it within 2–3 business days.',
+        ], 201);
     }
 
     /**
@@ -387,8 +427,9 @@ class AuthController extends Controller
         }
 
         $user->update([
-        'password'             => Hash::make($request->new_password),
-        'must_change_password' => false,
+            'password'             => Hash::make($request->new_password),
+            'must_change_password' => false,
+            'must_reset_password'  => false,
         ]);
         \App\Models\GymStaff::where('user_id', $user->id)
         ->update(['must_change_password' => false]);

@@ -100,6 +100,19 @@ Route::prefix('v1')->group(function () {
     // ── Telegram webhook (public — Telegram must reach this) ─────────
     Route::post('telegram/webhook',        [TelegramController::class, 'webhook']);
 
+    // ── File serving (public — filenames are random hashes, no auth needed) ─
+    Route::get('files/{path}', function (string $path) {
+        // Prevent directory traversal
+        $path     = ltrim($path, '/');
+        $fullPath = storage_path('app/public/' . $path);
+        $realPath = realpath($fullPath);
+        $realBase = realpath(storage_path('app/public'));
+        if (!$realPath || !str_starts_with($realPath, $realBase)) {
+            abort(404);
+        }
+        return response()->file($realPath);
+    })->where('path', '.*');
+
     // ── Auth & public ────────────────────────────────────────────────
     Route::post('auth/login',              [AuthController::class, 'login']);
     Route::post('auth/forgot-password',    [AuthController::class, 'forgotPassword']);
@@ -148,18 +161,50 @@ Route::prefix('v1')->group(function () {
             Route::delete('staff/{gymStaff}',    [\App\Http\Controllers\PartnerMobileController::class, 'removeStaff']);
             Route::patch('facility',             [\App\Http\Controllers\PartnerMobileController::class, 'updateFacility']);
             Route::post('facility/photo',        [\App\Http\Controllers\PartnerMobileController::class, 'uploadFacilityPhoto']);
+        }); // closes prefix('partner') mobile group
+
         // ── Telegram user settings ────────────────────────────────────
         Route::prefix('telegram')->group(function () {
             Route::get('status',            [TelegramSettingsController::class, 'status']);
             Route::post('generate-code',    [TelegramSettingsController::class, 'generateCode']);
             Route::delete('unlink',         [TelegramSettingsController::class, 'unlink']);
         });
-        }); // closes prefix('partner') mobile group
 
         Route::post('auth/logout',             [AuthController::class, 'logout']);
         Route::get('auth/me',                  [AuthController::class, 'me']);
         Route::post('auth/change-password',    [AuthController::class, 'changePassword']);
         Route::post('auth/first-login-reset',  [AuthController::class, 'firstLoginReset']);
+
+        // ── Admin: test email (diagnostic) ───────────────────────────
+        Route::post('admin/test-email', function (\Illuminate\Http\Request $request) {
+            $request->validate(['email' => 'required|email']);
+            try {
+                \Illuminate\Support\Facades\Mail::to($request->email)->send(
+                    new \App\Mail\FitAccessNotificationMail(
+                        recipientName: 'Test User',
+                        emailSubject:  'FitAccess Mail Test',
+                        heading:       'Mail is Working',
+                        message:       'If you received this email, the mail configuration on the server is working correctly.',
+                        buttonText:    'Go to FitAccess',
+                        color:         '#22c55e',
+                    )
+                );
+                return response()->json(['success' => true, 'message' => 'Test email sent to ' . $request->email]);
+            } catch (\Throwable $e) {
+                return response()->json([
+                    'success' => false,
+                    'error'   => $e->getMessage(),
+                    'class'   => get_class($e),
+                    'config'  => [
+                        'mailer'   => config('mail.default'),
+                        'host'     => config('mail.mailers.smtp.host'),
+                        'port'     => config('mail.mailers.smtp.port'),
+                        'from'     => config('mail.from.address'),
+                        'queue'    => config('queue.default'),
+                    ],
+                ], 500);
+            }
+        });
 
         // ── Admin Team & Permissions ──────────────────────────────────
         Route::prefix('admin/team')->group(function () {

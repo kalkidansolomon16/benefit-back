@@ -28,7 +28,6 @@ class AdminUserController extends Controller
         $this->requiresManage();
 
         $users = User::whereIn('role', User::ADMIN_SUB_ROLES)
-            ->withTrashed()
             ->orderByDesc('created_at')
             ->get()
             ->map(fn($u) => $this->formatUser($u));
@@ -49,7 +48,7 @@ class AdminUserController extends Controller
 
         $request->validate([
             'name'  => 'required|string|max:100',
-            'email' => 'required|email|unique:users,email',
+            'email' => ['required', 'email', \Illuminate\Validation\Rule::unique('users', 'email')->whereNull('deleted_at')],
             'role'  => ['required', 'string', 'in:' . implode(',', $validRoles)],
         ]);
 
@@ -115,7 +114,7 @@ class AdminUserController extends Controller
         $this->requiresManage();
         $this->assertSubRole($user);
 
-        $user->delete();
+        $user->forceDelete();
 
         return response()->json(['message' => 'User removed.']);
     }

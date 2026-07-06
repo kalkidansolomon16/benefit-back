@@ -260,7 +260,7 @@ class MobileController extends Controller
 
         $path = $request->file('photo')->store("profile-photos/{$user->id}", 'public');
         $user->update(['photo_path' => $path]);
-        $url = Storage::disk('public')->url($path);
+        $url = url('/api/v1/files/' . ltrim($path, '/'));
 
         return response()->json([
             'data'    => ['photo_url' => $url],

@@ -1,0 +1,10 @@
+.env
+node_modules
+.git
+storage/logs/*
+storage/framework/cache/*
+storage/framework/sessions/*
+storage/framework/views/*
+tests
+public/storage
+# vendor is intentionally NOT excluded — we copy it directly to avoid network timeouts

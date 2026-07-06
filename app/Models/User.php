@@ -19,12 +19,39 @@ class User extends Authenticatable implements CanResetPasswordContract
     use CanResetPassword;
 
     protected $fillable = [
-        'name', 'email', 'password', 'role',
+        'name', 'email', 'password', 'role', 'user_type',
         'fan_number', 'photo_path', 'phone', 'is_active',
         'must_reset_password', 'password_reset_token', 'password_reset_expires_at',
         'created_by', 'company_id', 'gym_id',
         'telegram_chat_id', 'telegram_link_token', 'telegram_link_expires_at',
     ];
+
+    protected static function boot(): void
+    {
+        parent::boot();
+
+        static::creating(function (User $user) {
+            if (empty($user->user_type)) {
+                $user->user_type = self::resolveUserType($user->role);
+            }
+        });
+
+        static::updating(function (User $user) {
+            if ($user->isDirty('role')) {
+                $user->user_type = self::resolveUserType($user->role);
+            }
+        });
+    }
+
+    public static function resolveUserType(?string $role): ?string
+    {
+        return match(true) {
+            $role === 'employee' => 'employee',
+            in_array($role, ['company_hr', 'company_finance', 'company_ceo', 'co_hr', 'co_executive', 'co_finance']) => 'company',
+            in_array($role, ['gym_partner', 'gym_staff', 'gym_hr', 'gym_executive', 'gym_finance']) => 'gym',
+            default => null,
+        };
+    }
 
     protected $hidden = ['password', 'remember_token', 'password_reset_token'];
 
@@ -113,6 +140,16 @@ class User extends Authenticatable implements CanResetPasswordContract
     public function hasPermission(string $permission): bool
     {
         if (in_array($this->role, ['super_admin', 'fitaccess_admin'])) {
+            return true;
+        }
+
+        // Primary company HR always has full access to company scope
+        if ($this->role === 'company_hr' && str_starts_with($permission, 'co.')) {
+            return true;
+        }
+
+        // Primary gym partner always has full access to gym scope
+        if ($this->role === 'gym_partner' && str_starts_with($permission, 'gym.')) {
             return true;
         }
 

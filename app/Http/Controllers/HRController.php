@@ -199,7 +199,28 @@ class HRController extends Controller
             'admin_approval_status' => 'pending',
         ]);
 
-        app(TelegramService::class)->notifyUserApproved($employee->user, 'hr_approved');
+        if ($employee->user?->email) {
+            try {
+                \Illuminate\Support\Facades\Mail::to($employee->user->email)->send(
+                    new \App\Mail\FitAccessNotificationMail(
+                        recipientName: $employee->user->name,
+                        emailSubject:  'Your FitAccess Registration Has Been Approved by HR',
+                        heading:       'HR Approval Confirmed',
+                        message:       "Your employee registration with " . ($employee->company?->name ?? 'your company') . " has been approved by HR.\n\nYour account is now pending final admin review. You will receive another email once fully activated — this usually takes 1–2 business days.",
+                        buttonText:    'Check Your Status',
+                        color:         '#f59e0b',
+                    )
+                );
+            } catch (\Throwable $e) {
+                \Illuminate\Support\Facades\Log::error('HR approve email failed: ' . $e->getMessage());
+            }
+        }
+
+        try {
+            app(TelegramService::class)->notifyUserApproved($employee->user, 'hr_approved');
+        } catch (\Throwable $e) {
+            \Illuminate\Support\Facades\Log::error('HR approve Telegram failed: ' . $e->getMessage());
+        }
 
         return response()->json([
             'message'     => 'Employee approved by HR. Pending admin final approval before account is activated.',
@@ -217,7 +238,28 @@ class HRController extends Controller
 
         AuditLog::record('updated', $employee, ['registration_status' => 'pending'], ['registration_status' => 'rejected']);
 
-        app(TelegramService::class)->notifyUserRejected($employee->user, 'employee');
+        if ($employee->user?->email) {
+            try {
+                \Illuminate\Support\Facades\Mail::to($employee->user->email)->send(
+                    new \App\Mail\FitAccessNotificationMail(
+                        recipientName: $employee->user->name,
+                        emailSubject:  'Your FitAccess Registration Has Been Rejected',
+                        heading:       'Registration Not Approved',
+                        message:       "We're sorry to inform you that your employee registration with " . ($employee->company?->name ?? 'your company') . " was not approved by HR.\n\nPlease contact your HR team for more information.",
+                        buttonText:    'Contact Support',
+                        color:         '#ef4444',
+                    )
+                );
+            } catch (\Throwable $e) {
+                \Illuminate\Support\Facades\Log::error('HR reject email failed: ' . $e->getMessage());
+            }
+        }
+
+        try {
+            app(TelegramService::class)->notifyUserRejected($employee->user, 'employee');
+        } catch (\Throwable $e) {
+            \Illuminate\Support\Facades\Log::error('HR reject Telegram failed: ' . $e->getMessage());
+        }
 
         return response()->json(['message' => 'Employee registration rejected.', 'employee_id' => $employee->id]);
     }
