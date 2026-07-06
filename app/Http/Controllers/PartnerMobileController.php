@@ -705,7 +705,7 @@ class PartnerMobileController extends Controller
         if ($oldPath) Storage::disk('public')->delete(str_replace('/storage/', '', $oldPath));
 
         $path = $request->file('photo')->store("gym-photos/{$gym->id}", 'public');
-        $url  = Storage::disk('public')->url($path);
+        $url  = url('/api/v1/files/' . ltrim($path, '/'));
 
         $gym->update([$field => $url]);
 

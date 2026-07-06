@@ -9,6 +9,7 @@ class PaymentMethod extends Model
 {
     protected $fillable = [
         'bank_name', 'account_name', 'account_number', 'instructions', 'is_active',
+        'type', 'bank_name', 'account_name', 'account_number', 'instructions', 'is_active',
     ];
 
     protected $casts = [

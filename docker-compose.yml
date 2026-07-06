@@ -1,0 +1,135 @@
+services:
+
+  # ── MySQL Database ───────────────────────────────────────────────
+  mysql:
+    image: mysql:8.0
+    container_name: benefit_mysql
+    restart: unless-stopped
+    environment:
+      MYSQL_DATABASE: ${DB_DATABASE:-benefit}
+      MYSQL_ROOT_PASSWORD: ${DB_PASSWORD:-secret}
+    volumes:
+      - mysql_data:/var/lib/mysql
+    ports:
+      - "3308:3306"
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "--silent"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+
+  # ── Build the backend image once, reused by app/migrate/queue ────
+  app:
+    image: benefit-backend:latest
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: benefit_app
+    restart: unless-stopped
+    working_dir: /var/www/html
+    volumes:
+      - storage_data:/var/www/html/storage/app/public
+    environment: &backend_env
+      APP_ENV: ${APP_ENV:-production}
+      APP_KEY: ${APP_KEY}
+      APP_DEBUG: ${APP_DEBUG:-false}
+      APP_URL: ${APP_URL:-http://localhost:8000}
+      DB_CONNECTION: mysql
+      DB_HOST: mysql
+      DB_PORT: 3306
+      DB_DATABASE: ${DB_DATABASE:-benefit}
+      DB_USERNAME: ${DB_USERNAME:-root}
+      DB_PASSWORD: ${DB_PASSWORD:-secret}
+      QUEUE_CONNECTION: database
+      SESSION_DRIVER: database
+      CACHE_STORE: database
+      FILESYSTEM_DISK: public
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN}
+      CHAPA_SECRET_KEY: ${CHAPA_SECRET_KEY}
+      CHAPA_PUBLIC_KEY: ${CHAPA_PUBLIC_KEY}
+      CHAPA_RETURN_URL: ${CHAPA_RETURN_URL}
+      MAIL_MAILER: smtp
+      MAIL_HOST: smtp.gmail.com
+      MAIL_PORT: 587
+      MAIL_USERNAME: kalkidansolomon1616@gmail.com
+      MAIL_PASSWORD: disfghsqqiicqpru
+      MAIL_FROM_ADDRESS: no-reply@fitaccess.com
+      MAIL_FROM_NAME: FitAccess
+      FRONTEND_URL: http://localhost:5173
+    depends_on:
+      mysql:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+
+  # ── Run Migrations (one-shot, exits after done) ──────────────────
+  migrate:
+    image: benefit-backend:latest
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: benefit_migrate
+    working_dir: /var/www/html
+    command: >
+      sh -c "php artisan migrate --force &&
+             php artisan db:seed --force &&
+             php artisan storage:link --force &&
+             php artisan config:cache &&
+             php artisan route:cache &&
+             php artisan view:cache"
+    environment: *backend_env
+    depends_on:
+      mysql:
+        condition: service_healthy
+    restart: "no"
+
+  # ── Nginx (API reverse proxy) ────────────────────────────────────
+  nginx:
+    image: nginx:alpine
+    container_name: benefit_nginx
+    restart: unless-stopped
+    ports:
+      - "8000:80"
+    volumes:
+      - ../docker/nginx/api.conf:/etc/nginx/conf.d/default.conf
+      - ./public:/var/www/html/public
+      - storage_data:/var/www/html/public/storage
+    depends_on:
+      - app
+
+  # ── Queue Worker ─────────────────────────────────────────────────
+  queue:
+    image: benefit-backend:latest
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: benefit_queue
+    restart: unless-stopped
+    working_dir: /var/www/html
+    command: php artisan queue:work --sleep=3 --tries=3 --max-time=3600
+    environment: *backend_env
+    depends_on:
+      mysql:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+
+  # ── phpMyAdmin ───────────────────────────────────────────────────
+  phpmyadmin:
+    image: phpmyadmin:latest
+    container_name: benefit_phpmyadmin
+    restart: unless-stopped
+    ports:
+      - "8082:80"
+    environment:
+      PMA_HOST: mysql
+      PMA_PORT: 3306
+      MYSQL_ROOT_PASSWORD: ${DB_PASSWORD:-secret}
+    depends_on:
+      mysql:
+        condition: service_healthy
+
+volumes:
+  mysql_data:
+  storage_data:

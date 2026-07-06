@@ -22,7 +22,7 @@ class SubscriptionController extends Controller
             ->when($request->status, fn($q) => $q->where('status', $request->status))
             ->when($request->company_id, fn($q) => $q->where('company_id', $request->company_id))
             ->latest()
-            ->paginate(15);
+            ->paginate(10);
 
         return SubscriptionResource::collection($subscriptions);
     }

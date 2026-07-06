@@ -9,6 +9,8 @@ use App\Models\Company;
 use App\Models\Employee;
 use App\Models\MembershipPlan;
 use App\Models\User;
+use App\Services\MembershipService;
+use App\Services\TelegramService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
@@ -19,13 +21,67 @@ class AdminBillingController extends Controller
     /* ── Helpers ──────────────────────────────────────────────── */
 
     /** Map employee level to its plan tier key. */
+    /** Map employee level to its canonical tier key. */
     private function levelToTier(string $level): string
     {
         return match ($level) {
             'chief'    => 'platinum',
             'director' => 'basic_plus',
+            'manager'  => 'basic_plus',
             default    => 'basic',
         };
+    }
+
+    /**
+     * Find a plan by tier with fallback matching.
+     *
+     * Priority:
+     *  1. Exact tier match        → 'basic'      matches 'basic'
+     *  2. Suffix match            → 'fit_basic'  ends with '_basic'
+     *  3. Prefix match            → 'basic_plus' starts with 'basic'
+     *  4. Synonym (premium ↔ platinum), repeat steps 1-2
+     *  5. Cheapest active plan as last resort (so billing never silently gives 0)
+     */
+    private function findPlanByTier(string $tier): ?MembershipPlan
+    {
+        // 1. Exact match
+        $plan = MembershipPlan::where('tier', $tier)->where('is_active', true)->first();
+        if ($plan) return $plan;
+
+        // 2. Suffix match: 'fit_basic' ends with '_basic'
+        $plan = MembershipPlan::where('is_active', true)
+            ->where('tier', 'LIKE', '%_' . $tier)
+            ->orderBy('monthly_fee_etb')
+            ->first();
+        if ($plan) return $plan;
+
+        // 3. For 'basic': avoid matching 'fit_basic_plus' — already handled above
+        //    but if tier is 'basic', also try tier that STARTS with 'basic' and is shortest
+        if ($tier === 'basic') {
+            $plan = MembershipPlan::where('is_active', true)
+                ->where('tier', 'LIKE', 'basic%')
+                ->orderBy('monthly_fee_etb')
+                ->first();
+            if ($plan) return $plan;
+        }
+
+        // 4. Synonym: platinum ↔ premium
+        $synonym = match ($tier) {
+            'platinum' => 'premium',
+            'premium'  => 'platinum',
+            default    => null,
+        };
+        if ($synonym) {
+            $plan = MembershipPlan::where('tier', $synonym)->where('is_active', true)->first()
+                 ?? MembershipPlan::where('is_active', true)
+                        ->where('tier', 'LIKE', '%_' . $synonym)
+                        ->orderBy('monthly_fee_etb', 'desc')
+                        ->first();
+            if ($plan) return $plan;
+        }
+
+        // 5. Last resort: pick cheapest active plan so price is never silently 0
+        return MembershipPlan::where('is_active', true)->orderBy('monthly_fee_etb')->first();
     }
 
     /* ── Invoice list ─────────────────────────────────────────── */
@@ -51,20 +107,32 @@ class AdminBillingController extends Controller
             'billing_period' => 'required|string|max:30',
             'due_date'       => 'nullable|date',
             'notes'          => 'nullable|string|max:1000',
+            'employee_id'    => 'nullable|exists:employees,id',
         ]);
 
-        $company = Company::findOrFail($request->company_id);
+        $company   = Company::findOrFail($request->company_id);
+        $singleEmp = $request->filled('employee_id');
 
-        // Get all enrolled + approved employees for this company
-        $employees = Employee::where('company_id', $company->id)
+        // Build employee query
+        $empQuery = Employee::where('company_id', $company->id)
             ->where('registration_status', 'approved')
-            ->where('is_enrolled', true)
-            ->get();
+            ->where('is_enrolled', true);
+
+        if ($singleEmp) {
+            // Pay Now flow: invoice for one specific employee only
+            $empQuery->where('id', $request->employee_id);
+        } else {
+            // Batch flow: only bill employees whose payment is still unpaid
+            $empQuery->where('payment_status', 'unpaid');
+        }
+
+        $employees = $empQuery->get();
 
         if ($employees->isEmpty()) {
-            return response()->json([
-                'message' => 'This company has no enrolled employees to invoice.',
-            ], 422);
+            $msg = $singleEmp
+                ? 'Employee not found or not eligible for invoicing.'
+                : 'This company has no unpaid enrolled employees to invoice.';
+            return response()->json(['message' => $msg], 422);
         }
 
         // Group employees by tier, look up plan prices
@@ -75,7 +143,7 @@ class AdminBillingController extends Controller
             $tier = $this->levelToTier($emp->level ?? 'staff');
 
             if (!isset($planPriceCache[$tier])) {
-                $plan = MembershipPlan::where('tier', $tier)->first();
+                $plan = $this->findPlanByTier($tier);
                 $planPriceCache[$tier] = [
                     'name'  => $plan?->name ?? ucfirst(str_replace('_', ' ', $tier)),
                     'price' => (float) ($plan?->monthly_fee_etb ?? 0),
@@ -99,6 +167,17 @@ class AdminBillingController extends Controller
                 'unit_price'     => $unitPrice,
                 'subtotal'       => $subtotal,
             ];
+        }
+
+        if ($total < 100) {
+            $details = [];
+            foreach ($planPriceCache as $tier => $info) {
+                $details[] = "tier '{$tier}' → " . ($info['price'] > 0 ? "ETB {$info['price']} ({$info['name']})" : "no plan found (ETB 0)");
+            }
+            $detailStr = $details ? ' Plan lookup: ' . implode('; ', $details) . '.' : '';
+            return response()->json([
+                'message' => "Invoice total is ETB {$total} — invoices must be at least ETB 100.{$detailStr} Make sure active membership plans exist with tiers matching your employees' levels.",
+            ], 422);
         }
 
         return DB::transaction(function () use ($request, $company, $items, $total): JsonResponse {
@@ -145,6 +224,12 @@ class AdminBillingController extends Controller
             'sent_at' => now(),
         ]);
 
+        try {
+            app(TelegramService::class)->notifyCompanyInvoiceSent($billingInvoice);
+        } catch (\Throwable $e) {
+            \Illuminate\Support\Facades\Log::error('Invoice sent Telegram failed: ' . $e->getMessage());
+        }
+
         return response()->json(['message' => 'Invoice sent to company.', 'invoice' => $this->formatInvoice($billingInvoice)]);
     }
 
@@ -188,7 +273,7 @@ class AdminBillingController extends Controller
             'notes' => 'nullable|string|max:500',
         ]);
 
-        return DB::transaction(function () use ($request, $billingPayment): JsonResponse {
+        $result = DB::transaction(function () use ($request, $billingPayment): array {
             // Mark payment as verified
             $billingPayment->update([
                 'status'      => 'verified',
@@ -209,10 +294,25 @@ class AdminBillingController extends Controller
                 ->where('registration_status', 'approved')
                 ->update(['payment_status' => 'paid']);
 
-            return response()->json([
-                'message' => 'Payment verified. All company employees are now marked as paid.',
-            ]);
+            return MembershipService::provisionForCompany($billingPayment->company_id);
         });
+
+        try {
+            $billingPayment->loadMissing('invoice');
+            app(TelegramService::class)->notifyCompanyPaymentVerified($billingPayment);
+        } catch (\Throwable $e) {
+            \Illuminate\Support\Facades\Log::error('Payment verified Telegram failed: ' . $e->getMessage());
+        }
+
+        return response()->json([
+            'message' => sprintf(
+                'Payment verified. %d employee(s) are now marked as paid and %d gym membership(s) have been activated.',
+                $result['employees'],
+                $result['memberships']
+            ),
+            'employees_updated'   => $result['employees'],
+            'memberships_created' => $result['memberships'],
+        ]);
     }
 
     /* ── Reject payment ───────────────────────────────────────── */
@@ -236,6 +336,13 @@ class AdminBillingController extends Controller
 
         // Revert invoice back to sent so company can resubmit
         $billingPayment->invoice->update(['status' => 'sent']);
+
+        try {
+            $billingPayment->loadMissing('invoice');
+            app(TelegramService::class)->notifyCompanyPaymentRejected($billingPayment, $request->notes);
+        } catch (\Throwable $e) {
+            \Illuminate\Support\Facades\Log::error('Payment rejected Telegram failed: ' . $e->getMessage());
+        }
 
         return response()->json(['message' => 'Payment rejected. Company notified to resubmit.']);
     }
@@ -411,7 +518,7 @@ class AdminBillingController extends Controller
             'payment_method_bank'          => $p->payment_method_bank,
             'payment_method_account_name'  => $p->payment_method_account_name,
             'payment_method_account_number'=> $p->payment_method_account_number,
-            'receipt_path'                 => $p->receipt_path ? Storage::disk('public')->url($p->receipt_path) : null,
+            'receipt_path'                 => $p->receipt_path ? url('/api/v1/files/' . ltrim($p->receipt_path, '/')) : null,
             'status'                       => $p->status,
             'submitted_at'                 => $p->submitted_at?->toDateTimeString(),
             'verified_at'                  => $p->verified_at?->toDateTimeString(),

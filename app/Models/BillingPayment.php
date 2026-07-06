@@ -9,6 +9,7 @@ class BillingPayment extends Model
 {
     protected $fillable = [
         'billing_invoice_id', 'company_id', 'amount',
+        'payment_channel', 'chapa_tx_ref', 'chapa_verified_at',
         'payment_method_id',
         'payment_method_bank', 'payment_method_account_name', 'payment_method_account_number',
         'receipt_path', 'status',
@@ -18,6 +19,9 @@ class BillingPayment extends Model
     protected $casts = [
         'submitted_at' => 'datetime',
         'verified_at'  => 'datetime',
+        'submitted_at'      => 'datetime',
+        'verified_at'       => 'datetime',
+        'chapa_verified_at' => 'datetime',
     ];
 
     public function invoice(): BelongsTo

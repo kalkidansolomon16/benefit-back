@@ -35,4 +35,17 @@ return [
         ],
     ],
 
+    'telegram' => [
+        'bot_token'    => env('TELEGRAM_BOT_TOKEN', ''),
+        'bot_username' => env('TELEGRAM_BOT_USERNAME', 'FitAccessBot'),
+        'proxy'        => env('TELEGRAM_PROXY', ''),
+    ],
+
+    'chapa' => [
+        'secret_key' => env('CHAPA_SECRET_KEY'),
+        'public_key' => env('CHAPA_PUBLIC_KEY'),
+        'base_url'   => 'https://api.chapa.co/v1',
+        'return_url' => env('CHAPA_RETURN_URL', 'http://localhost:5173/hr/billing/chapa-return'),
+    ],
+
 ];

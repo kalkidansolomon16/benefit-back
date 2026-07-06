@@ -1,0 +1,20 @@
+docker start
+docker image ls
+docker build -t (target:latest) .
+docker run (name)
+docker run -d -p 8080:80 benefit-back:latest
+docker ps -> running service
+docker stop (name)
+
+============================
+
+docker push (name)
+docker pull (name)
+docker image ls
+docker run (name)
+
+===========================
+ssh 10.10.10.9@kal password
+docker pull (name)
+docker run (name)
+

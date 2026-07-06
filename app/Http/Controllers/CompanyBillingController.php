@@ -201,7 +201,7 @@ class CompanyBillingController extends Controller
                 'payment_method_account_name'   => $p->payment_method_account_name,
                 'payment_method_account_number' => $p->payment_method_account_number,
                 'receipt_url'                   => $p->receipt_path
-                    ? Storage::disk('public')->url($p->receipt_path) : null,
+                    ? url('/api/v1/files/' . ltrim($p->receipt_path, '/')) : null,
                 'status'                        => $p->status,
                 'submitted_at'                  => $p->submitted_at?->toDateTimeString(),
                 'admin_notes'                   => $p->admin_notes,

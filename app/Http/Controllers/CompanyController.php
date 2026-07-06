@@ -4,8 +4,10 @@ namespace App\Http\Controllers;
 
 use App\Http\Requests\StoreCompanyRequest;
 use App\Http\Resources\CompanyResource;
+use App\Models\AuditLog;
 use App\Models\Company;
 use App\Models\User;
+use App\Services\TelegramService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Http\Resources\Json\AnonymousResourceCollection;
@@ -37,7 +39,7 @@ class CompanyController extends Controller
                 'employees as enrolled_employees_count' => fn($q) => $q->where('is_enrolled', true),
             ])
             ->latest()
-            ->paginate(15);
+            ->paginate(10);
 
         return CompanyResource::collection($companies);
     }
@@ -105,6 +107,7 @@ class CompanyController extends Controller
                     'is_active' => $isActive,
                 ]);
 
+                AuditLog::record('created', $company);
                 return response()->json([
                     'message' => "Company '{$company->name}' registered and HR account created.",
                     'company' => new CompanyResource($company),
@@ -132,6 +135,7 @@ class CompanyController extends Controller
         unset($data['business_license']);
 
         $company = Company::create($data);
+        AuditLog::record('created', $company);
 
         return response()->json(new CompanyResource($company), 201);
     }
@@ -166,6 +170,9 @@ class CompanyController extends Controller
         unset($data['business_license']);
 
         $company->update($data);
+        $old = $company->only(array_keys($data));
+        $company->update($data);
+        AuditLog::record('updated', $company, $old, $data);
 
         return new CompanyResource($company);
     }
@@ -177,6 +184,7 @@ class CompanyController extends Controller
             Storage::disk('public')->delete($company->business_license_path);
         }
 
+        AuditLog::record('deleted', $company);
         $company->delete();
 
         return response()->json(['message' => 'Company deleted.']);
@@ -190,6 +198,7 @@ class CompanyController extends Controller
         // Keep the HR user account in sync so they can (or cannot) log in
         $company->hrUser?->update(['is_active' => $newState]);
 
+        AuditLog::record('updated', $company, ['is_active' => !$newState], ['is_active' => $newState]);
         return response()->json(['is_active' => $company->is_active]);
     }
 
@@ -216,6 +225,48 @@ class CompanyController extends Controller
             $company->hrUser?->update(['is_active' => true]);
         }
 
+        // Telegram + email notification (wrapped so failures never break the response)
+        $hrUser = $company->hrUser;
+        $reason = $request->reason ?? null;
+        if ($hrUser) {
+            // Email first — own try-catch so Telegram failure can't block it
+            if ($hrUser->email) {
+                try {
+                    if ($isApproved) {
+                        \Illuminate\Support\Facades\Mail::to($hrUser->email)
+                            ->send(new \App\Mail\AccountApprovedMail($hrUser));
+                    } else {
+                        \Illuminate\Support\Facades\Mail::to($hrUser->email)->send(
+                            new \App\Mail\FitAccessNotificationMail(
+                                recipientName: $hrUser->name,
+                                emailSubject:  'Your FitAccess Company Registration Was Not Approved',
+                                heading:       'Business Licence Not Approved',
+                                message:       "We regret to inform you that your company registration for {$company->name} was not approved."
+                                              . ($reason ? "\n\nReason: {$reason}" : '')
+                                              . "\n\nYou may re-apply with the correct documents or contact FitAccess support.",
+                                buttonText:    'Contact Support',
+                                color:         '#ef4444',
+                            )
+                        );
+                    }
+                } catch (\Throwable $e) {
+                    \Illuminate\Support\Facades\Log::error('Company licence email failed: ' . $e->getMessage());
+                }
+            }
+            // Telegram separately
+            try {
+                $telegram = app(TelegramService::class);
+                if ($isApproved) {
+                    $telegram->notifyUserApproved($hrUser, 'company');
+                } else {
+                    $telegram->notifyUserRejected($hrUser, 'company', $reason);
+                }
+            } catch (\Throwable $e) {
+                \Illuminate\Support\Facades\Log::error('Company licence Telegram failed: ' . $e->getMessage());
+            }
+        }
+
+        AuditLog::record('updated', $company, ['business_license_status' => $company->getOriginal('business_license_status')], ['business_license_status' => $request->status]);
         return response()->json([
             'message'                 => "Business licence marked as {$request->status}.",
             'business_license_status' => $company->business_license_status,

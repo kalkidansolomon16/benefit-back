@@ -31,7 +31,7 @@ class CompanyResource extends JsonResource
             // Business licence
             'business_license_path'    => $this->business_license_path,
             'business_license_url'     => $this->business_license_path
-                                            ? Storage::disk('public')->url($this->business_license_path)
+                                            ? url('/api/v1/files/' . ltrim($this->business_license_path, '/'))
                                             : null,
             'business_license_status'  => $this->business_license_status,
 

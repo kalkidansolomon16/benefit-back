@@ -64,9 +64,10 @@ class EmployeePortalController extends Controller
             };
         }
 
-        // Accessible plan names (for the frontend filter labels)
+        // Accessible plan names (only the standard tiers that match)
+        $tierRank = ['basic' => 0, 'basic_plus' => 1, 'premium' => 2, 'platinum' => 3];
         $accessiblePlanLabels = $allActivePlans
-            ->filter(fn($p) => in_array($p->tier, $accessibleTiers))
+            ->filter(fn($p) => in_array($p->tier, $accessibleTiers) && isset($tierRank[$p->tier]))
             ->mapWithKeys(fn($p) => [$p->tier => $p->name])
             ->toArray();
 
