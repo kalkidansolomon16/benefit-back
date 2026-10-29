@@ -6,7 +6,7 @@ services:
     restart: unless-stopped
     environment:
       MYSQL_DATABASE: fitaccess_db
-      MYSQL_ROOT_PASSWORD: FitAccess@2026
+      MYSQL_ROOT_PASSWORD: ${DB_PASSWORD:?Set DB_PASSWORD in .env}
     volumes:
       - mysql_data:/var/lib/mysql
     ports:
@@ -31,7 +31,7 @@ services:
              php artisan view:cache"
     environment: &backend_env
       APP_ENV: production
-      APP_KEY: base64:y/VTa4B9l+CgpYslb49Yyhy5tV0WggqVbseHm9md0k0=
+      APP_KEY: ${APP_KEY:?Set APP_KEY in .env}
       APP_DEBUG: "false"
       APP_URL: http://localhost:8000
       FRONTEND_URL: https://fitaccess.kalkidan.net
@@ -41,13 +41,13 @@ services:
       CHAPA_RETURN_URL: https://fitaccess.kalkidan.net/hr/billing/chapa-return
       CHAPA_WEBHOOK_URL: https://fitaccess-api.kalkidan.net/api/v1/chapa/webhook
       # TODO: set to the "secret hash" from that account's dashboard → Settings → Webhooks
-      CHAPA_WEBHOOK_SECRET: ""
+      CHAPA_WEBHOOK_SECRET: ${CHAPA_WEBHOOK_SECRET:-}
       DB_CONNECTION: mysql
       DB_HOST: mysql
       DB_PORT: 3306
       DB_DATABASE: fitaccess_db
       DB_USERNAME: root
-      DB_PASSWORD: FitAccess@2026
+      DB_PASSWORD: ${DB_PASSWORD:?Set DB_PASSWORD in .env}
       QUEUE_CONNECTION: database
       SESSION_DRIVER: database
       CACHE_STORE: database
@@ -114,7 +114,7 @@ services:
     environment:
       PMA_HOST: mysql
       PMA_PORT: 3306
-      MYSQL_ROOT_PASSWORD: FitAccess@2026
+      MYSQL_ROOT_PASSWORD: ${DB_PASSWORD:?Set DB_PASSWORD in .env}
     depends_on:
       mysql:
         condition: service_healthy
