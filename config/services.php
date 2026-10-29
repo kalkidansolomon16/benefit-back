@@ -42,10 +42,20 @@ return [
     ],
 
     'chapa' => [
-        'secret_key' => env('CHAPA_SECRET_KEY'),
-        'public_key' => env('CHAPA_PUBLIC_KEY'),
-        'base_url'   => 'https://api.chapa.co/v1',
-        'return_url' => env('CHAPA_RETURN_URL', 'http://localhost:5173/hr/billing/chapa-return'),
+        'secret_key'     => env('CHAPA_SECRET_KEY'),
+        'public_key'     => env('CHAPA_PUBLIC_KEY'),
+        'base_url'       => 'https://api.chapa.co/v1',
+        'return_url'     => env('CHAPA_RETURN_URL', 'http://localhost:5173/hr/billing/chapa-return'),
+        'webhook_url'    => env('CHAPA_WEBHOOK_URL', env('APP_URL') . '/api/v1/chapa/webhook'),
+        // Set in the Chapa dashboard's Webhooks tab (Settings → Webhooks) when you
+        // register the webhook URL — distinct from the API secret key.
+        'webhook_secret' => env('CHAPA_WEBHOOK_SECRET'),
+    ],
+
+    'recaptcha' => [
+        'site_key'   => env('RECAPTCHA_SITE_KEY'),
+        'secret_key' => env('RECAPTCHA_SECRET_KEY'),
+        'min_score'  => env('RECAPTCHA_MIN_SCORE', 0.5),
     ],
 
 ];

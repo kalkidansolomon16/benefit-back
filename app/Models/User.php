@@ -22,7 +22,7 @@ class User extends Authenticatable implements CanResetPasswordContract
         'name', 'email', 'password', 'role', 'user_type',
         'fan_number', 'photo_path', 'phone', 'is_active',
         'must_reset_password', 'password_reset_token', 'password_reset_expires_at',
-        'created_by', 'company_id', 'gym_id',
+        'created_by', 'company_id', 'company_branch_id', 'gym_id',
         'telegram_chat_id', 'telegram_link_token', 'telegram_link_expires_at',
     ];
 
@@ -53,7 +53,10 @@ class User extends Authenticatable implements CanResetPasswordContract
         };
     }
 
-    protected $hidden = ['password', 'remember_token', 'password_reset_token'];
+    protected $hidden = [
+        'password', 'remember_token', 'password_reset_token',
+        'google2fa_secret', 'google2fa_recovery_codes',
+    ];
 
     protected function casts(): array
     {
@@ -63,6 +66,9 @@ class User extends Authenticatable implements CanResetPasswordContract
             'must_reset_password'        => 'boolean',
             'password_reset_expires_at'  => 'datetime',
             'telegram_link_expires_at'   => 'datetime',
+            'google2fa_secret'           => 'encrypted',
+            'google2fa_enabled'          => 'boolean',
+            'google2fa_recovery_codes'   => 'encrypted:array',
         ];
     }
 
@@ -96,6 +102,32 @@ class User extends Authenticatable implements CanResetPasswordContract
     public function gym(): BelongsTo
     {
         return $this->belongsTo(Gym::class);
+    }
+
+    public function companyBranch(): BelongsTo
+    {
+        return $this->belongsTo(CompanyBranch::class);
+    }
+
+    /**
+     * Forget the authenticator: the next login shows a fresh QR code.
+     * Also signs the user out everywhere so the reset takes effect at once.
+     */
+    public function resetTwoFactor(): void
+    {
+        $this->forceFill([
+            'google2fa_secret'         => null,
+            'google2fa_enabled'        => false,
+            'google2fa_recovery_codes' => null,
+        ])->save();
+
+        $this->tokens()->delete();
+    }
+
+    /** A company_hr login that belongs to one branch (not the head office) */
+    public function isCompanyBranchLogin(): bool
+    {
+        return $this->role === 'company_hr' && !empty($this->company_branch_id);
     }
 
     public function userPermissions(): HasMany

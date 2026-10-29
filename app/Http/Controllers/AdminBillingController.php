@@ -6,6 +6,7 @@ use App\Models\BillingInvoice;
 use App\Models\BillingNegotiation;
 use App\Models\BillingPayment;
 use App\Models\Company;
+use App\Models\CompanyBranch;
 use App\Models\Employee;
 use App\Models\MembershipPlan;
 use App\Models\User;
@@ -44,52 +45,19 @@ class AdminBillingController extends Controller
      */
     private function findPlanByTier(string $tier): ?MembershipPlan
     {
-        // 1. Exact match
-        $plan = MembershipPlan::where('tier', $tier)->where('is_active', true)->first();
-        if ($plan) return $plan;
-
-        // 2. Suffix match: 'fit_basic' ends with '_basic'
-        $plan = MembershipPlan::where('is_active', true)
-            ->where('tier', 'LIKE', '%_' . $tier)
-            ->orderBy('monthly_fee_etb')
-            ->first();
-        if ($plan) return $plan;
-
-        // 3. For 'basic': avoid matching 'fit_basic_plus' — already handled above
-        //    but if tier is 'basic', also try tier that STARTS with 'basic' and is shortest
-        if ($tier === 'basic') {
-            $plan = MembershipPlan::where('is_active', true)
-                ->where('tier', 'LIKE', 'basic%')
-                ->orderBy('monthly_fee_etb')
-                ->first();
-            if ($plan) return $plan;
-        }
-
-        // 4. Synonym: platinum ↔ premium
-        $synonym = match ($tier) {
-            'platinum' => 'premium',
-            'premium'  => 'platinum',
-            default    => null,
-        };
-        if ($synonym) {
-            $plan = MembershipPlan::where('tier', $synonym)->where('is_active', true)->first()
-                 ?? MembershipPlan::where('is_active', true)
-                        ->where('tier', 'LIKE', '%_' . $synonym)
-                        ->orderBy('monthly_fee_etb', 'desc')
-                        ->first();
-            if ($plan) return $plan;
-        }
-
-        // 5. Last resort: pick cheapest active plan so price is never silently 0
-        return MembershipPlan::where('is_active', true)->orderBy('monthly_fee_etb')->first();
+        // Plan tiers are typed by admins ("Fit Basic", "fit_basic_plus"), so compare them
+        // in a normalised form. No cheapest-plan fallback here: billing must never
+        // quietly price someone at the wrong plan.
+        return MembershipService::resolvePlan($tier, false);
     }
 
     /* ── Invoice list ─────────────────────────────────────────── */
 
     public function index(Request $request): JsonResponse
     {
-        $invoices = BillingInvoice::with(['company:id,name', 'items', 'latestPayment'])
+        $invoices = BillingInvoice::with(['company:id,name', 'companyBranch:id,name', 'items', 'latestPayment'])
             ->when($request->company_id, fn($q) => $q->where('company_id', $request->company_id))
+            ->when($request->filled('company_branch_id'), fn($q) => $q->where('company_branch_id', $request->company_branch_id))
             ->when($request->status,     fn($q) => $q->where('status', $request->status))
             ->latest()
             ->get()
@@ -108,6 +76,8 @@ class AdminBillingController extends Controller
             'due_date'       => 'nullable|date',
             'notes'          => 'nullable|string|max:1000',
             'employee_id'    => 'nullable|exists:employees,id',
+            // Bill just one branch: a branch id, or "main" for the head office
+            'branch'         => 'nullable|max:20',
         ]);
 
         $company   = Company::findOrFail($request->company_id);
@@ -116,98 +86,191 @@ class AdminBillingController extends Controller
         // Build employee query
         $empQuery = Employee::where('company_id', $company->id)
             ->where('registration_status', 'approved')
-            ->where('is_enrolled', true);
+            ->where('is_enrolled', true)
+            ->where('payment_status', '!=', 'paid');
+
+        if ($request->filled('branch')) {
+            $branchParam = (string) $request->branch;
+            if ($branchParam === 'main') {
+                $empQuery->whereNull('company_branch_id');
+            } elseif (ctype_digit($branchParam) && $company->branches()->whereKey((int) $branchParam)->exists()) {
+                $empQuery->where('company_branch_id', (int) $branchParam);
+            } else {
+                return response()->json(['message' => 'That branch does not belong to this company.'], 422);
+            }
+        }
 
         if ($singleEmp) {
             // Pay Now flow: invoice for one specific employee only
             $empQuery->where('id', $request->employee_id);
         } else {
-            // Batch flow: only bill employees whose payment is still unpaid
-            $empQuery->where('payment_status', 'unpaid');
+            // Batch flow: only bill employees not yet paid for THIS billing period.
+            // paid_period (not the sticky payment_status flag) tracks which period an
+            // employee was last settled for, so billing re-arms every new cycle.
+            $empQuery->where(function ($q) use ($request) {
+                $q->whereNull('paid_period')
+                  ->orWhere('paid_period', '!=', $request->billing_period);
+            });
         }
 
-        $employees = $empQuery->get();
+        $employees = $empQuery->with('activeMembership.plan')->get();
 
         if ($employees->isEmpty()) {
             $msg = $singleEmp
                 ? 'Employee not found or not eligible for invoicing.'
-                : 'This company has no unpaid enrolled employees to invoice.';
+                : 'This company has no enrolled employees still unpaid for this billing period.';
             return response()->json(['message' => $msg], 422);
         }
 
-        // Group employees by tier, look up plan prices
-        $planPriceCache = [];
-        $groups = [];
+        $hasBranches = $company->branches()->exists();
 
-        foreach ($employees as $emp) {
-            $tier = $this->levelToTier($emp->level ?? 'staff');
+        // A company with branches is billed per branch: one invoice for each branch
+        // (the head office counts as its own), so every branch pays only for its own employees.
+        $groups = $hasBranches
+            ? $employees->groupBy(fn($e) => $e->company_branch_id ?? 0)
+            : collect([0 => $employees]);
 
-            if (!isset($planPriceCache[$tier])) {
-                $plan = $this->findPlanByTier($tier);
-                $planPriceCache[$tier] = [
-                    'name'  => $plan?->name ?? ucfirst(str_replace('_', ' ', $tier)),
-                    'price' => (float) ($plan?->monthly_fee_etb ?? 0),
+        $branchNames = $hasBranches
+            ? $company->branches()->pluck('name', 'id')
+            : collect();
+
+        $created = [];
+        $skipped = [];
+
+        foreach ($groups as $branchKey => $group) {
+            $branchId = $hasBranches && $branchKey ? (int) $branchKey : null;
+            $label    = !$hasBranches
+                ? $company->name
+                : ($branchId ? ($branchNames[$branchId] ?? "Branch {$branchId}") : 'Head office');
+
+            $built = $this->buildInvoiceItems($group);
+
+            if ($built['total'] < 100) {
+                $skipped[] = [
+                    'branch'  => $label,
+                    'total'   => $built['total'],
+                    'details' => $built['details'],
                 ];
+                continue;
             }
 
-            $groups[$tier] = ($groups[$tier] ?? 0) + 1;
+            $created[] = DB::transaction(function () use ($request, $company, $built, $branchId, $hasBranches, $singleEmp): BillingInvoice {
+                $invoice = BillingInvoice::create([
+                    'company_id'        => $company->id,
+                    'company_branch_id' => $branchId,
+                    'branch_scoped'     => $hasBranches,
+                    'employee_id'       => $singleEmp ? $request->employee_id : null,
+                    'billing_period'    => $request->billing_period,
+                    'total_amount'      => $built['total'],
+                    'due_date'          => $request->due_date,
+                    'notes'             => $request->notes,
+                    'status'            => 'draft',
+                ]);
+
+                foreach ($built['items'] as $item) {
+                    $invoice->items()->create($item);
+                }
+
+                return $invoice->load(['items', 'companyBranch:id,name']);
+            });
+        }
+
+        if (!$created) {
+            $first = $skipped[0];
+            $where = $hasBranches ? " for {$first['branch']}" : '';
+            return response()->json([
+                'message' => "Invoice total{$where} is ETB {$first['total']} — invoices must be at least ETB 100.{$first['details']} Make sure active membership plans exist with tiers matching your employees' levels.",
+            ], 422);
+        }
+
+        $message = count($created) === 1
+            ? "Invoice {$created[0]->invoice_number} generated for {$company->name}"
+                . ($hasBranches ? ' (' . ($created[0]->companyBranch?->name ?? 'Head office') . ')' : '') . '.'
+            : count($created) . " invoices generated for {$company->name}, one per branch.";
+        if ($skipped) {
+            $message .= ' Skipped (below ETB 100): ' . implode(', ', array_map(fn($s) => $s['branch'], $skipped)) . '.';
+        }
+
+        return response()->json([
+            'message'  => $message,
+            'invoice'  => $this->formatInvoice($created[0]),
+            'invoices' => array_map(fn($inv) => $this->formatInvoice($inv), $created),
+            'skipped'  => $skipped,
+        ], 201);
+    }
+
+    /**
+     * Price a group of employees: resolve each one's level→tier→plan, then group by the
+     * resolved plan so tiers that fall back to the same plan aren't shown as duplicate lines.
+     *
+     * @return array{items: array, total: float|int, details: string}
+     */
+    private function buildInvoiceItems($employees): array
+    {
+        $planByTier   = [];   // tier => ['planKey', 'planTier', 'planName', 'price']
+        $groupsByPlan = [];   // planKey => ['plan_tier', 'plan_name', 'unit_price', 'count']
+
+        foreach ($employees as $emp) {
+            // Prefer the tier of the employee's active membership plan (most accurate);
+            // fall back to level-based lookup for employees not yet provisioned.
+            $activePlan = $emp->activeMembership?->plan;
+            $tier = $activePlan?->tier ?? $this->levelToTier($emp->level ?? 'staff');
+
+            if (!isset($planByTier[$tier])) {
+                $plan = $activePlan && $activePlan->tier === $tier ? $activePlan : $this->findPlanByTier($tier);
+                $price    = (float) ($plan?->monthly_fee_etb ?? 0);
+                $planName = $plan?->name ?? ucfirst(str_replace('_', ' ', $tier));
+                $planTier = $plan?->tier ?? $tier;
+                $planKey  = $plan ? "plan_{$plan->id}" : "tier_{$tier}";
+                $planByTier[$tier] = compact('planKey', 'planTier', 'planName', 'price');
+            }
+
+            $info    = $planByTier[$tier];
+            $planKey = $info['planKey'];
+
+            if (!isset($groupsByPlan[$planKey])) {
+                $groupsByPlan[$planKey] = [
+                    'plan_tier'  => $info['planTier'],
+                    'plan_name'  => $info['planName'],
+                    'unit_price' => $info['price'],
+                    'count'      => 0,
+                ];
+            }
+            $groupsByPlan[$planKey]['count']++;
         }
 
         $total = 0;
         $items = [];
-        foreach ($groups as $tier => $count) {
-            $unitPrice = $planPriceCache[$tier]['price'];
-            $subtotal  = $count * $unitPrice;
-            $total    += $subtotal;
+        foreach ($groupsByPlan as $info) {
+            $subtotal = $info['count'] * $info['unit_price'];
+            $total   += $subtotal;
 
             $items[] = [
-                'plan_tier'      => $tier,
-                'plan_name'      => $planPriceCache[$tier]['name'],
-                'employee_count' => $count,
-                'unit_price'     => $unitPrice,
+                'plan_tier'      => $info['plan_tier'],
+                'plan_name'      => $info['plan_name'],
+                'employee_count' => $info['count'],
+                'unit_price'     => $info['unit_price'],
                 'subtotal'       => $subtotal,
             ];
         }
 
-        if ($total < 100) {
-            $details = [];
-            foreach ($planPriceCache as $tier => $info) {
-                $details[] = "tier '{$tier}' → " . ($info['price'] > 0 ? "ETB {$info['price']} ({$info['name']})" : "no plan found (ETB 0)");
-            }
-            $detailStr = $details ? ' Plan lookup: ' . implode('; ', $details) . '.' : '';
-            return response()->json([
-                'message' => "Invoice total is ETB {$total} — invoices must be at least ETB 100.{$detailStr} Make sure active membership plans exist with tiers matching your employees' levels.",
-            ], 422);
+        $details = [];
+        foreach ($planByTier as $tier => $info) {
+            $details[] = "tier '{$tier}' → " . ($info['price'] > 0 ? "ETB {$info['price']} ({$info['planName']})" : 'no plan found (ETB 0)');
         }
 
-        return DB::transaction(function () use ($request, $company, $items, $total): JsonResponse {
-            $invoice = BillingInvoice::create([
-                'company_id'     => $company->id,
-                'billing_period' => $request->billing_period,
-                'total_amount'   => $total,
-                'due_date'       => $request->due_date,
-                'notes'          => $request->notes,
-                'status'         => 'draft',
-            ]);
-
-            foreach ($items as $item) {
-                $invoice->items()->create($item);
-            }
-
-            $invoice->load('items');
-
-            return response()->json([
-                'message' => "Invoice {$invoice->invoice_number} generated for {$company->name}.",
-                'invoice' => $this->formatInvoice($invoice),
-            ], 201);
-        });
+        return [
+            'items'   => $items,
+            'total'   => $total,
+            'details' => $details ? ' Plan lookup: ' . implode('; ', $details) . '.' : '',
+        ];
     }
 
     /* ── Show single invoice ──────────────────────────────────── */
 
     public function show(BillingInvoice $billingInvoice): JsonResponse
     {
-        $billingInvoice->load(['company:id,name,contact_email,contact_phone', 'items', 'payments.verifiedBy:id,name']);
+        $billingInvoice->load(['company:id,name,contact_email,contact_phone', 'companyBranch:id,name', 'items', 'payments.verifiedBy:id,name']);
         return response()->json($this->formatInvoice($billingInvoice, true));
     }
 
@@ -250,7 +313,8 @@ class AdminBillingController extends Controller
     public function pendingPayments(): JsonResponse
     {
         $payments = BillingPayment::with([
-            'invoice:id,invoice_number,billing_period,total_amount,company_id',
+            'invoice:id,invoice_number,billing_period,total_amount,company_id,company_branch_id,branch_scoped',
+            'invoice.companyBranch:id,name',
             'company:id,name',
         ])
             ->where('status', 'pending')
@@ -288,13 +352,10 @@ class AdminBillingController extends Controller
                 'paid_at' => now(),
             ]);
 
-            // Mark all enrolled employees of this company as paid
-            Employee::where('company_id', $billingPayment->company_id)
-                ->where('is_enrolled', true)
-                ->where('registration_status', 'approved')
-                ->update(['payment_status' => 'paid']);
-
-            return MembershipService::provisionForCompany($billingPayment->company_id);
+            // Provision memberships + mark employees paid for this billing period.
+            // If the invoice was scoped to a single employee (Pay Now), only that
+            // employee is marked paid — not everyone under the company.
+            return MembershipService::provisionForInvoice($billingPayment->invoice);
         });
 
         try {
@@ -435,6 +496,7 @@ class AdminBillingController extends Controller
 
             // Deactivate the HR user account
             User::where('email', $company->contact_email)->update(['is_active' => false]);
+            $company->setAccountsActive(false);   // branch logins too
 
             $label = $status === 'banned' ? 'permanently banned' : 'suspended';
 
@@ -481,6 +543,10 @@ class AdminBillingController extends Controller
             'sent_at'        => $inv->sent_at?->toDateTimeString(),
             'paid_at'        => $inv->paid_at?->toDateTimeString(),
             'created_at'     => $inv->created_at->toDateString(),
+            'branch_scoped'  => (bool) $inv->branch_scoped,
+            'branch'         => $inv->branch_scoped
+                ? ['id' => $inv->company_branch_id, 'name' => $inv->companyBranch?->name ?? 'Head office']
+                : null,
             'company'        => $inv->company ? [
                 'id'            => $inv->company->id,
                 'name'          => $inv->company->name,
@@ -513,6 +579,9 @@ class AdminBillingController extends Controller
             'invoice_number'               => $p->invoice?->invoice_number,
             'billing_period'               => $p->invoice?->billing_period,
             'invoice_total'                => $p->invoice?->total_amount,
+            'branch'                       => $p->invoice?->branch_scoped
+                ? ['id' => $p->invoice->company_branch_id, 'name' => $p->invoice->companyBranch?->name ?? 'Head office']
+                : null,
             'company'                      => $p->company ? ['id' => $p->company->id, 'name' => $p->company->name] : null,
             'amount'                       => $p->amount,
             'payment_method_bank'          => $p->payment_method_bank,

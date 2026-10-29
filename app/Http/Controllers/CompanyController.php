@@ -14,6 +14,7 @@ use Illuminate\Http\Resources\Json\AnonymousResourceCollection;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Hash;
 use Illuminate\Support\Facades\Storage;
+use Illuminate\Support\Str;
 
 class CompanyController extends Controller
 {
@@ -25,6 +26,17 @@ class CompanyController extends Controller
             ->get(['id', 'name', 'industry', 'city']);
 
         return response()->json(['data' => $companies]);
+    }
+
+    /** Public: branches of one company, for the employee sign-up dropdown */
+    public function publicBranches(Company $company): JsonResponse
+    {
+        $branches = $company->branches()
+            ->where('is_active', true)
+            ->orderBy('name')
+            ->get(['id', 'name', 'city']);
+
+        return response()->json(['data' => $branches]);
     }
 
     public function index(Request $request): AnonymousResourceCollection
@@ -60,12 +72,10 @@ class CompanyController extends Controller
             'city'          => 'nullable|string|max:100',
             'tin_number'    => 'nullable|string|max:50',
             'is_active'                => 'boolean',
-            'hr_password'              => 'required|string|min:6',
             'preferred_payment_method' => 'nullable|in:cbe_transfer,telebirr_enterprise,awash_bank,chapa,cash,other',
             'business_license'         => 'nullable|file|mimes:pdf,jpg,jpeg,png|max:5120',
         ], [
             'contact_email.unique' => 'This email is already registered.',
-            'hr_password.min'      => 'Password must be at least 6 characters.',
         ]);
 
         $licensePath = null;
@@ -98,20 +108,24 @@ class CompanyController extends Controller
 
                 $company = Company::create($companyData);
 
+                $tempPassword = Str::password(14);
+
                 $user = User::create([
-                    'name'      => $request->contact_person,
-                    'email'     => $request->contact_email,
-                    'password'  => Hash::make($request->hr_password),
-                    'role'      => 'company_hr',
-                    'phone'     => $request->contact_phone,
-                    'is_active' => $isActive,
+                    'name'                => $request->contact_person,
+                    'email'               => $request->contact_email,
+                    'password'            => Hash::make($tempPassword),
+                    'role'                => 'company_hr',
+                    'phone'               => $request->contact_phone,
+                    'is_active'           => $isActive,
+                    'must_reset_password' => true,
                 ]);
 
                 AuditLog::record('created', $company);
                 return response()->json([
-                    'message' => "Company '{$company->name}' registered and HR account created.",
-                    'company' => new CompanyResource($company),
-                    'hr_email'=> $user->email,
+                    'message'       => "Company '{$company->name}' registered and HR account created.",
+                    'company'       => new CompanyResource($company),
+                    'hr_email'      => $user->email,
+                    'temp_password' => $tempPassword,
                 ], 201);
             });
         } catch (\Throwable $e) {
@@ -196,7 +210,7 @@ class CompanyController extends Controller
         $company->update(['is_active' => $newState]);
 
         // Keep the HR user account in sync so they can (or cannot) log in
-        $company->hrUser?->update(['is_active' => $newState]);
+        $company->setAccountsActive($newState);
 
         AuditLog::record('updated', $company, ['is_active' => !$newState], ['is_active' => $newState]);
         return response()->json(['is_active' => $company->is_active]);
@@ -222,7 +236,7 @@ class CompanyController extends Controller
 
         // Activate (or keep deactivated) the HR user so they can log in
         if ($isApproved) {
-            $company->hrUser?->update(['is_active' => true]);
+            $company->setAccountsActive(true);
         }
 
         // Telegram + email notification (wrapped so failures never break the response)

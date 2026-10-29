@@ -8,11 +8,11 @@ use App\Models\MobileSubscription;
 use App\Models\Notification;
 use App\Models\QrToken;
 use App\Models\User;
+use App\Services\QrTokenService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Storage;
-use Illuminate\Support\Str;
 
 class MobileController extends Controller
 {
@@ -164,38 +164,17 @@ class MobileController extends Controller
             }
         }
 
-        // Reuse today's token if valid
-        $existing = QrToken::where('user_id', $user->id)
-            ->where('expires_at', '>', now())
-            ->latest()
-            ->first();
-
-        if ($existing) {
-            return response()->json([
-                'data' => [
-                    'token'        => $existing->token,
-                    'member_code'  => $user->member_code,
-                    'member_name'  => $user->name,
-                    'expires_at'   => $existing->expires_at->toIso8601String(),
-                    'package_name' => $subscription?->plan?->name ?? 'Employee Plan',
-                    'package_tier' => $subscription?->plan?->tier ?? 'basic',
-                ],
-            ]);
-        }
-
-        // Generate new token valid until end of day
-        $token = QrToken::create([
-            'user_id'    => $user->id,
-            'token'      => Str::random(64),
-            'expires_at' => now()->endOfDay(),
-        ]);
+        // Short-lived, single-use token. The app refreshes it before it
+        // expires, so a screenshot or photo of the code is useless within a minute.
+        $issued = app(QrTokenService::class)->issue($user);
 
         return response()->json([
             'data' => [
-                'token'        => $token->token,
+                'token'        => $issued['token'],
                 'member_code'  => $user->member_code,
                 'member_name'  => $user->name,
-                'expires_at'   => $token->expires_at->toIso8601String(),
+                'expires_at'   => $issued['expires_at']->toIso8601String(),
+                'expires_in'   => QrTokenService::TTL_SECONDS,
                 'package_name' => $subscription?->plan?->name ?? 'Employee Plan',
                 'package_tier' => $subscription?->plan?->tier ?? 'basic',
             ],
@@ -432,13 +411,8 @@ class MobileController extends Controller
             'end_date'          => $endDate,
         ]);
 
-        // Generate QR token immediately
+        // Revoke any outstanding check-in codes; the QR screen issues a fresh one.
         QrToken::where('user_id', $user->id)->delete();
-        QrToken::create([
-            'user_id'    => $user->id,
-            'token'      => Str::random(64),
-            'expires_at' => now()->endOfDay(),
-        ]);
 
         return response()->json([
             'data' => [

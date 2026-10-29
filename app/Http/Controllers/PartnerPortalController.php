@@ -2,6 +2,7 @@
 
 namespace App\Http\Controllers;
 
+use App\Models\Checkin;
 use App\Models\Gym;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Support\Carbon;
@@ -10,18 +11,7 @@ class PartnerPortalController extends Controller
 {
     private function getMyGym(): Gym
     {
-        $gym = Gym::where('contact_email', auth()->user()->email)
-            ->withCount(['checkins', 'activeMembers'])
-            ->first();
-        $user = auth()->user();
-
-        $query = Gym::withCount(['checkins', 'activeMembers']);
-
-        if ($user->gym_id) {
-            $gym = $query->find($user->gym_id);
-        } else {
-            $gym = $query->where('contact_email', $user->email)->first();
-        }
+        $gym = Gym::forPartner(auth()->user(), null, Gym::withCount(['checkins', 'activeMembers']));
 
         if (!$gym) {
             abort(403, 'No gym is linked to this partner account.');
@@ -36,7 +26,16 @@ class PartnerPortalController extends Controller
         $now     = Carbon::now();
 
         // ── Check-in stats ──────────────────────────────────────────
-        $allCheckins = $gym->checkins()->with('employee.user')->get();
+        // A multi-branch gym can look at one branch (default) or every branch it may view
+        $viewable    = Gym::viewableBy(auth()->user())->get(['id']);
+        $branchCount = $viewable->count();
+        $ids         = request()->query('scope') === 'all' && $branchCount > 1
+            ? $viewable->pluck('id')->all()
+            : [$gym->id];
+
+        $allCheckins = Checkin::whereIn('gym_id', $ids)
+            ->with(['employee.user', 'gym:id,name,branch_name'])
+            ->get();
 
         $todayCheckins  = $allCheckins->filter(fn($c) => $c->checked_in_at?->isToday())->count();
         $weekCheckins   = $allCheckins->filter(fn($c) => $c->checked_in_at?->isCurrentWeek())->count();
@@ -71,6 +70,8 @@ class PartnerPortalController extends Controller
             ->take(10)
             ->map(fn($c) => [
                 'id'             => $c->id,
+                'gym_id'         => $c->gym_id,
+                'branch'         => $c->gym?->branch_name ?: $c->gym?->name,
                 'employee_name'  => $c->employee?->user?->name ?? 'Unknown',
                 'fan_number'     => $c->employee?->fan_number,
                 'checked_in_at'  => $c->checked_in_at?->format('Y-m-d H:i'),
@@ -109,6 +110,8 @@ class PartnerPortalController extends Controller
                 'capacity_pct'     => $capacityPct,
                 'avg_duration_min' => $avgDuration,
             ],
+            'branches_count' => $branchCount,
+            'scope'          => count($ids) > 1 ? 'all' : 'current',
             'checkin_trend'  => $trend,
             'recent_checkins'=> $recent,
         ]);

@@ -34,7 +34,7 @@ class FitAccessNotificationMail extends Mailable
         return new Content(view: 'emails.fitaccess-notification', with: [
             'recipientName' => $this->recipientName,
             'heading'       => $this->heading,
-            'message'       => $this->message,
+            'bodyText'      => $this->message,
             'buttonText'    => $this->buttonText,
             'buttonUrl'     => $this->buttonUrl,
             'color'         => $this->color,

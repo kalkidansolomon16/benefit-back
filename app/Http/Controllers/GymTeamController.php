@@ -4,7 +4,6 @@ namespace App\Http\Controllers;
 
 use App\Models\Gym;
 use App\Models\Permission;
-use App\Models\Role;
 use App\Models\RolePermission;
 use App\Models\User;
 use App\Models\UserPermission;
@@ -17,11 +16,7 @@ class GymTeamController extends Controller
 {
     private function getMyGym(): Gym
     {
-        $user = auth()->user();
-        if ($user->gym_id) return Gym::findOrFail($user->gym_id);
-        $gym = Gym::where('owner_user_id', $user->id)
-            ->orWhere('contact_email', $user->email)
-            ->first();
+        $gym = Gym::forPartner(auth()->user());
         if (!$gym) abort(403, 'No gym linked to this account.');
         return $gym;
     }
@@ -54,13 +49,8 @@ class GymTeamController extends Controller
     public function store(Request $request): JsonResponse
     {
         $this->requiresManage();
-        $gym = $this->getMyGym();
-
         $gym        = $this->getMyGym();
-        $validRoles = Role::where('scope', 'gym')
-            ->where(fn($q) => $q->whereNull('gym_id')->orWhere('gym_id', $gym->id))
-            ->where('name', '!=', 'gym_partner')   // owner role not assignable
-            ->pluck('name')->toArray();
+        $validRoles = User::GYM_SUB_ROLES;
 
         $request->validate([
             'name'  => 'required|string|max:100',
@@ -68,7 +58,7 @@ class GymTeamController extends Controller
             'role'  => ['required', 'string', 'in:' . implode(',', $validRoles)],
         ]);
 
-        $tempPassword = Str::random(6) . rand(10, 99) . '!';
+        $tempPassword = Str::password(14);
 
         $user = User::create([
             'name'                => $request->name,
@@ -110,7 +100,7 @@ class GymTeamController extends Controller
         $this->requiresManage();
         $this->assertOwnership($user);
 
-        $tempPassword = Str::random(6) . rand(10, 99) . '!';
+        $tempPassword = Str::password(14);
         $user->update(['password' => Hash::make($tempPassword), 'must_reset_password' => true]);
 
         return response()->json(['message' => 'Password reset.', 'temp_password' => $tempPassword]);
