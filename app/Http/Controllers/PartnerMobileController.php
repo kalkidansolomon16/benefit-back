@@ -8,13 +8,15 @@ use App\Models\GymStaff;
 use App\Models\MobileSubscription;
 use App\Models\Notification;
 use App\Models\PartnerPayout;
-use App\Models\QrToken;
 use App\Models\User;
+use App\Services\QrTokenService;
+use App\Services\SessionTokenService;
 use Carbon\Carbon;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Hash;
+use Illuminate\Support\Facades\Log;
 use App\Mail\StaffInviteMail;
 use Illuminate\Support\Facades\Mail;
 use Illuminate\Support\Facades\Storage;
@@ -51,6 +53,25 @@ class PartnerMobileController extends Controller
         return $staff?->role === 'admin';
     }
 
+    /**
+     * The `month` query parameter as [year, month], defaulting to the current
+     * month. Rejects anything that isn't a real YYYY-MM with a 422.
+     *
+     * @return array{0: int, 1: int}
+     */
+    private function requestedMonth(Request $request): array
+    {
+        $request->validate(['month' => 'nullable|date_format:Y-m']);
+
+        // '!' zeroes the unparsed fields; without it today's day is used and
+        // e.g. "2026-02" on the 31st would roll over into March.
+        $month = $request->filled('month')
+            ? Carbon::createFromFormat('!Y-m', $request->query('month'))
+            : now();
+
+        return [$month->year, $month->month];
+    }
+
     // ── Partner Me ────────────────────────────────────────────────────────────
 
     public function me(Request $request): JsonResponse
@@ -58,6 +79,7 @@ class PartnerMobileController extends Controller
         $user      = $request->user();
         $gymStaff  = $this->getMyStaffRecord($request);
         $gym       = $this->getMyGym($request);
+        $isOwner   = $this->isOwner($request);
 
         return response()->json([
             'data' => [
@@ -68,13 +90,18 @@ class PartnerMobileController extends Controller
                     'role'  => $user->role,
                 ],
                 'gym' => $gym ? [
-                    'id'             => $gym->id,
-                    'name'           => $gym->name,
-                    'category'       => $gym->category ?? 'gym',
-                    'tier'           => $gym->tier,
-                    'address'        => $gym->address,
-                    'per_visit_rate' => (float) ($gym->per_visit_rate ?? 0),
+                    'id'       => $gym->id,
+                    'name'     => $gym->name,
+                    'category' => $gym->category ?? 'gym',
+                    'address'  => $gym->address,
+                    // Commercial terms are owner-only (INSA CWE-602).
+                    ...($isOwner ? [
+                        'tier'           => $gym->tier,
+                        'per_visit_rate' => (float) ($gym->per_visit_rate ?? 0),
+                    ] : []),
                 ] : null,
+                // Authoritative for the app's owner/staff UI; never trust a stored role.
+                'is_owner'             => $isOwner,
                 'staff_role'           => $gymStaff?->role ?? 'staff',
                 'must_change_password' => $gymStaff?->must_change_password ?? $user->must_change_password ?? false,
             ],
@@ -82,43 +109,59 @@ class PartnerMobileController extends Controller
     }
 
     // ── SCAN — Validate QR and record check-in ────────────────────────────────
-    // Enforces: token validity → member status → subscription → tier → 12hr → monthly cap
+    // Enforces: staff → own gym → single-use token → member status →
+    // subscription → tier → 12hr → monthly cap.
+    //
+    // Security (INSA CWE-345): the check-in is decided and recorded here,
+    // keyed only by the member the token resolves to. The client never
+    // supplies member identity or which gym the visit counts for, and the
+    // response is for display only.
 
-    public function scan(Request $request): JsonResponse
+    public function scan(Request $request, QrTokenService $qrTokens): JsonResponse
     {
         $request->validate([
-            'qr_token' => 'required|string',
-            'gym_id'   => 'required|integer',
+            'qr_token' => 'required|string|max:128',
+            // Sent by app builds from before the fix. Ignored unless it disagrees.
+            'gym_id'   => 'sometimes|integer',
         ]);
 
-        $gym = Gym::where('id', $request->gym_id)->where('is_active', true)->first();
-        if (!$gym) {
+        $staff = $request->user();
+        $gym   = in_array($staff->role, ['gym_staff', 'gym_partner'], true)
+            ? $this->getMyGym($request)
+            : null;
+
+        if (!$gym || !$gym->is_active) {
+            Log::warning('partner.scan.forbidden', ['user_id' => $staff->id]);
             return response()->json([
-                'data' => ['valid' => false, 'reason' => 'Facility not found or inactive.'],
-            ]);
+                'message' => 'Your account is not assigned to an active facility.',
+            ], 403);
         }
 
-        // ── 1. Validate QR token ──────────────────────────────────────────────
-        $qrToken = QrToken::where('token', $request->qr_token)
-            ->where('expires_at', '>', now())
-            ->first();
+        if ($request->filled('gym_id') && (int) $request->gym_id !== (int) $gym->id) {
+            Log::warning('partner.scan.gym_mismatch', [
+                'user_id'       => $staff->id,
+                'gym_id'        => $gym->id,
+                'claimed_gym_id'=> (int) $request->gym_id,
+            ]);
+            return response()->json([
+                'message' => 'This facility is not assigned to your account.',
+            ], 403);
+        }
+
+        // ── 1. Redeem QR token (single use, short-lived) ──────────────────────
+        $qrToken = $qrTokens->consume($request->qr_token, $gym->id);
 
         if (!$qrToken) {
-            return response()->json([
-                'data' => [
-                    'valid'  => false,
-                    'reason' => 'Invalid or expired QR code. Ask the member to refresh their QR.',
-                ],
-            ]);
+            return $this->rejectScan($request, $gym, 'invalid_token',
+                'Invalid, expired or already used QR code. Ask the member to show the code on their screen now.');
         }
 
         $member = User::find($qrToken->user_id);
 
         // ── 2. Member active check ────────────────────────────────────────────
         if (!$member || !$member->is_active) {
-            return response()->json([
-                'data' => ['valid' => false, 'reason' => 'Member account is suspended.'],
-            ]);
+            return $this->rejectScan($request, $gym, 'member_suspended',
+                'Member account is suspended.', $member?->id);
         }
 
         // ── 3. Find active subscription (B2C or B2B employee) ────────────────
@@ -129,10 +172,11 @@ class PartnerMobileController extends Controller
             ->latest()
             ->first();
 
-        $planTier    = null;
-        $planName    = null;
-        $employeeId  = null;
-        $memberCode  = $member->member_code ?? $member->fan_number;
+        $planTier      = null;
+        $planName      = null;
+        $employeeId    = null;
+        $empMembership = null;
+        $memberCode    = $member->member_code ?? $member->fan_number;
 
         if ($subscription) {
             $planTier = $subscription->plan?->tier;
@@ -149,12 +193,8 @@ class PartnerMobileController extends Controller
                 ->first();
 
             if (!$empMembership) {
-                return response()->json([
-                    'data' => [
-                        'valid'  => false,
-                        'reason' => 'No active subscription. Member must purchase a plan.',
-                    ],
-                ]);
+                return $this->rejectScan($request, $gym, 'no_subscription',
+                    'No active subscription. Member must purchase a plan.', $member->id);
             }
 
             $planTier   = $empMembership->tier;
@@ -163,9 +203,12 @@ class PartnerMobileController extends Controller
         }
 
         // ── 4. Tier access check ──────────────────────────────────────────────
-        $tierRank = ['basic' => 1, 'basic_plus' => 2, 'premium' => 3, 'platinum' => 3];
-        $memberRank = $tierRank[$planTier] ?? 0;
-        $gymRank    = $tierRank[$gym->tier] ?? 0;
+        // Plan tiers are free text (e.g. "Fit Premium"), gym tiers are enum keys
+        // (e.g. "premium") — normalise both before ranking or every plan scores 0.
+        $normalize  = fn ($t) => preg_replace('/^fit_/', '', preg_replace('/[\s\-]+/', '_', strtolower(trim((string) $t))));
+        $tierRank   = ['basic' => 1, 'basic_plus' => 2, 'premium' => 3, 'platinum' => 3];
+        $memberRank = $tierRank[$normalize($planTier)] ?? 0;
+        $gymRank    = $tierRank[$normalize($gym->tier)] ?? 0;
 
         if ($memberRank < $gymRank) {
             $required = match ($gym->tier) {
@@ -173,73 +216,76 @@ class PartnerMobileController extends Controller
                 'basic_plus'          => 'Basic Plus or Platinum',
                 default               => 'Basic',
             };
-            return response()->json([
-                'data' => [
-                    'valid'  => false,
-                    'reason' => "This facility requires a {$required} plan. Member needs to upgrade.",
-                ],
-            ]);
+            return $this->rejectScan($request, $gym, 'tier_too_low',
+                "This facility requires a {$required} plan. Member needs to upgrade.", $member->id);
         }
 
-        // ── 5. 12-HOUR RULE ───────────────────────────────────────────────────
-        $lastCheckin = Checkin::where('gym_id', $gym->id)
-            ->where(function ($q) use ($member, $employeeId) {
-                $q->where('user_id', $member->id);
-                if ($employeeId) {
-                    $q->orWhere('employee_id', $employeeId);
-                }
-            })
-            ->orderByDesc('checked_in_at')
-            ->first();
-
-        if ($lastCheckin) {
-            $hoursSince = Carbon::parse($lastCheckin->checked_in_at)->diffInMinutes(now()) / 60;
-            if ($hoursSince < 12) {
-                $hoursRemaining = round(12 - $hoursSince, 1);
-                return response()->json([
-                    'data' => [
-                        'valid'  => false,
-                        'reason' => "You already checked in here today. You can check in again in {$hoursRemaining} hours.",
-                    ],
-                ]);
-            }
-        }
-
-        // ── 6. Monthly cap check ──────────────────────────────────────────────
-        $monthlyCount = Checkin::where('gym_id', $gym->id)
-            ->where(function ($q) use ($member, $employeeId) {
-                $q->where('user_id', $member->id);
-                if ($employeeId) {
-                    $q->orWhere('employee_id', $employeeId);
-                }
-            })
-            ->whereYear('checked_in_at', now()->year)
-            ->whereMonth('checked_in_at', now()->month)
-            ->count();
-
+        // ── 5–7. Visit rules + record, serialised per member ─────────────────
+        // Locking the member row makes the 12-hour and monthly-cap checks and
+        // the insert one atomic step, so two concurrent scans can't both pass.
         $maxMonthly = 20; // default cap — can be plan-specific
-        if ($monthlyCount >= $maxMonthly) {
-            return response()->json([
-                'data' => [
-                    'valid'  => false,
-                    'reason' => "Monthly visit limit reached for this facility ({$monthlyCount} visits used). Limit resets on the 1st.",
-                ],
+
+        $outcome = DB::transaction(function () use ($request, $gym, $member, $employeeId, $empMembership, $maxMonthly) {
+            User::whereKey($member->id)->lockForUpdate()->first();
+
+            $memberVisits = fn () => Checkin::where('gym_id', $gym->id)
+                ->where(function ($q) use ($member, $employeeId) {
+                    $q->where('user_id', $member->id);
+                    if ($employeeId) {
+                        $q->orWhere('employee_id', $employeeId);
+                    }
+                });
+
+            // ── 5. 12-HOUR RULE ───────────────────────────────────────────────
+            $lastCheckin = $memberVisits()->orderByDesc('checked_in_at')->first();
+
+            if ($lastCheckin) {
+                $hoursSince = Carbon::parse($lastCheckin->checked_in_at)->diffInMinutes(now()) / 60;
+                if ($hoursSince < 12) {
+                    $hoursRemaining = round(12 - $hoursSince, 1);
+                    return ['rejected', 'cooldown',
+                        "You already checked in here today. You can check in again in {$hoursRemaining} hours."];
+                }
+            }
+
+            // ── 6. Monthly cap check ──────────────────────────────────────────
+            $monthlyCount = $memberVisits()
+                ->whereYear('checked_in_at', now()->year)
+                ->whereMonth('checked_in_at', now()->month)
+                ->count();
+
+            if ($monthlyCount >= $maxMonthly) {
+                return ['rejected', 'monthly_cap',
+                    "Monthly visit limit reached for this facility ({$monthlyCount} visits used). Limit resets on the 1st."];
+            }
+
+            // ── 7. Record check-in ────────────────────────────────────────────
+            $checkin = Checkin::create([
+                'gym_id'        => $gym->id,
+                'employee_id'   => $employeeId,
+                'user_id'       => $member->id,
+                'checked_in_at' => now(),
+                'method'        => 'qr_code',
+                'recorded_by'   => $request->user()->name,
+                // membership_id references B2B `memberships`; B2C visits are linked by user_id.
+                'membership_id' => $empMembership->membership_id ?? null,
             ]);
+
+            return ['recorded', $checkin, $monthlyCount + 1];
+        });
+
+        if ($outcome[0] === 'rejected') {
+            return $this->rejectScan($request, $gym, $outcome[1], $outcome[2], $member->id);
         }
 
-        // ── 7. Record check-in ────────────────────────────────────────────────
-        $checkin = Checkin::create([
-            'gym_id'        => $gym->id,
-            'employee_id'   => $employeeId,
-            'user_id'       => $member->id,
-            'checked_in_at' => now(),
-            'method'        => 'qr_code',
-            'recorded_by'   => $request->user()->name,
-            'membership_id' => $subscription?->id ?? ($empMembership->membership_id ?? null),
-        ]);
+        [, $checkin, $visitsThisMonth] = $outcome;
 
-        $visitsThisMonth = $monthlyCount + 1;
-        $visitsRemaining = max(0, $maxMonthly - $visitsThisMonth);
+        Log::info('partner.scan.recorded', [
+            'user_id'    => $request->user()->id,
+            'gym_id'     => $gym->id,
+            'member_id'  => $member->id,
+            'checkin_id' => $checkin->id,
+        ]);
 
         return response()->json([
             'data' => [
@@ -247,12 +293,32 @@ class PartnerMobileController extends Controller
                 'checkin_id'       => $checkin->id,
                 'member_name'      => $member->name,
                 'member_code'      => $memberCode,
+                // Lets staff compare the face on screen with the person in front of them.
+                'member_photo_url' => $member->photo_path,
                 'package_name'     => $planName,
                 'package_tier'     => $planTier,
                 'visits_this_month'=> $visitsThisMonth,
-                'visits_remaining' => $visitsRemaining,
+                'visits_remaining' => max(0, $maxMonthly - $visitsThisMonth),
                 'checked_in_at'    => $checkin->checked_in_at->toIso8601String(),
             ],
+        ]);
+    }
+
+    /**
+     * Logs a refused scan for monitoring and returns the display-only reason.
+     * The QR token itself is never logged.
+     */
+    private function rejectScan(Request $request, Gym $gym, string $code, string $reason, ?int $memberId = null): JsonResponse
+    {
+        Log::warning('partner.scan.rejected', [
+            'code'      => $code,
+            'user_id'   => $request->user()->id,
+            'gym_id'    => $gym->id,
+            'member_id' => $memberId,
+        ]);
+
+        return response()->json([
+            'data' => ['valid' => false, 'reason' => $reason],
         ]);
     }
 
@@ -260,6 +326,10 @@ class PartnerMobileController extends Controller
 
     public function dashboard(Request $request): JsonResponse
     {
+        if (!$this->isOwner($request)) {
+            return response()->json(['message' => 'Owner access required.'], 403);
+        }
+
         $gym = $this->getMyGym($request);
         if (!$gym) {
             return response()->json(['message' => 'No gym linked to this account.'], 403);
@@ -363,8 +433,7 @@ class PartnerMobileController extends Controller
         $gym = $this->getMyGym($request);
         if (!$gym) return response()->json(['message' => 'No gym linked.'], 403);
 
-        $month = $request->month ?? now()->format('Y-m');
-        [$year, $mon] = explode('-', $month);
+        [$year, $mon] = $this->requestedMonth($request);
 
         $checkins = Checkin::where('gym_id', $gym->id)
             ->whereYear('checked_in_at', $year)
@@ -410,8 +479,7 @@ class PartnerMobileController extends Controller
         $gym = $this->getMyGym($request);
         if (!$gym) return response()->json(['message' => 'No gym linked.'], 403);
 
-        $month = $request->month ?? now()->format('Y-m');
-        [$year, $mon] = explode('-', $month);
+        [$year, $mon] = $this->requestedMonth($request);
 
         $checkins = Checkin::where('gym_id', $gym->id)
             ->whereYear('checked_in_at', $year)
@@ -451,13 +519,18 @@ class PartnerMobileController extends Controller
 
         $estimatedPayout = $total * (float) ($gym->per_visit_rate ?? 0);
 
+        // Staff see attendance figures; rates, tier and payouts are owner-only.
+        $isOwner = $this->isOwner($request);
+
         return response()->json([
             'data' => [
                 'period' => Carbon::createFromDate($year, $mon, 1)->format('F Y'),
                 'gym'    => [
-                    'name'           => $gym->name,
-                    'per_visit_rate' => (float) ($gym->per_visit_rate ?? 0),
-                    'tier'           => $gym->tier,
+                    'name' => $gym->name,
+                    ...($isOwner ? [
+                        'per_visit_rate' => (float) ($gym->per_visit_rate ?? 0),
+                        'tier'           => $gym->tier,
+                    ] : []),
                 ],
                 'summary' => [
                     'total_checkins'  => $total,
@@ -467,12 +540,12 @@ class PartnerMobileController extends Controller
                     'peak_day'        => $peakDay,
                     'peak_day_count'  => $peakDayCount ?? 0,
                 ],
-                'estimated_payout' => [
+                'estimated_payout' => $isOwner ? [
                     'checkins'       => $total,
                     'rate_per_visit' => (float) ($gym->per_visit_rate ?? 0),
                     'total'          => round($estimatedPayout, 2),
                     'status'         => 'pending',
-                ],
+                ] : null,
                 'daily_activity' => $dailyActivity,
                 'top_members'    => $topMembers,
             ],
@@ -483,6 +556,10 @@ class PartnerMobileController extends Controller
 
     public function financials(Request $request): JsonResponse
     {
+        if (!$this->isOwner($request)) {
+            return response()->json(['message' => 'Owner access required.'], 403);
+        }
+
         $gym = $this->getMyGym($request);
         if (!$gym) return response()->json(['message' => 'No gym linked.'], 403);
 
@@ -641,6 +718,11 @@ class PartnerMobileController extends Controller
         }
 
         $gymStaff->update(['is_active' => false]);
+
+        // End the removed person's sessions so their phone is signed out now.
+        if ($removed = User::find($gymStaff->user_id)) {
+            app(SessionTokenService::class)->revokeAll($removed);
+        }
 
         return response()->json(['message' => 'Staff member removed from your team.']);
     }

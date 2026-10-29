@@ -100,6 +100,9 @@ Route::prefix('v1')->group(function () {
 
 
     // ── Partner app password reset (code-based, mobile-friendly) ────
+    // Member sessions: rotate / revoke with the refresh token (no access token needed)
+    Route::post('auth/refresh',            [AuthController::class, 'refresh'])->middleware('throttle:20,1');
+    Route::post('auth/revoke',             [AuthController::class, 'revokeRefreshToken'])->middleware('throttle:20,1');
     Route::post('auth/partner/forgot-password', [AuthController::class, 'forgotPassword'])->middleware('throttle:5,1');
     Route::post('auth/partner/reset-password',  [AuthController::class, 'resetPassword'])->middleware('throttle:5,1');
 
@@ -137,12 +140,16 @@ Route::prefix('v1')->group(function () {
     Route::middleware('auth:sanctum')->group(function () {
 
         Route::post('auth/logout',          [AuthController::class, 'logout']);
+        Route::post('auth/logout-all',      [AuthController::class, 'logoutAll']);
+        Route::get('auth/sessions',         [AuthController::class, 'sessions']);
+        Route::delete('auth/sessions/{tokenId}', [AuthController::class, 'revokeSession'])->whereNumber('tokenId');
         Route::get('auth/me',               [AuthController::class, 'me']);
         Route::post('auth/change-password', [AuthController::class, 'changePassword']);
         // ── MOBILE — Member (User App) ────────────────────────────────────────
         Route::prefix('mobile')->group(function () {
             Route::get('dashboard',              [\App\Http\Controllers\MobileController::class, 'dashboard']);
-            Route::get('qr-token',               [\App\Http\Controllers\MobileController::class, 'qrToken']);
+            Route::get('sessions',               [AuthController::class, 'sessions']);
+            Route::get('qr-token',               [\App\Http\Controllers\MobileController::class, 'qrToken'])->middleware('throttle:10,1');
             Route::get('profile',                [\App\Http\Controllers\MobileController::class, 'profile']);
             Route::patch('profile',              [\App\Http\Controllers\MobileController::class, 'updateProfile']);
             Route::post('profile/photo',         [\App\Http\Controllers\MobileController::class, 'uploadPhoto']);
@@ -162,7 +169,7 @@ Route::prefix('v1')->group(function () {
         Route::prefix('partner')->group(function () {
             Route::get('me',                     [\App\Http\Controllers\PartnerMobileController::class, 'me']);
             Route::get('dashboard',              [\App\Http\Controllers\PartnerMobileController::class, 'dashboard']);
-            Route::post('scan',                  [\App\Http\Controllers\PartnerMobileController::class, 'scan']);
+            Route::post('scan',                  [\App\Http\Controllers\PartnerMobileController::class, 'scan'])->middleware('throttle:30,1');
             Route::get('visits/today',           [\App\Http\Controllers\PartnerMobileController::class, 'visitsToday']);
             Route::get('visits/monthly',         [\App\Http\Controllers\PartnerMobileController::class, 'visitsMonthly']);
             Route::get('reports',                [\App\Http\Controllers\PartnerMobileController::class, 'reports']);

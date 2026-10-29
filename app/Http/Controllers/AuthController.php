@@ -10,6 +10,8 @@ use App\Models\Employee;
 use App\Models\PartnerApplication;
 use App\Models\User;
 use App\Services\RecaptchaService;
+use App\Services\SessionTokenService;
+use App\Services\RecaptchaService;
 use App\Services\TelegramService;
 use App\Services\TwoFactorService;
 use Illuminate\Http\JsonResponse;
@@ -22,6 +24,7 @@ use Illuminate\Support\Facades\Mail;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Str;
 use Illuminate\Validation\ValidationException;
+use Laravel\Sanctum\PersonalAccessToken;
 use OpenApi\Attributes as OA;
 
 class AuthController extends Controller
@@ -80,8 +83,9 @@ class AuthController extends Controller
     public function login(Request $request, RecaptchaService $recaptcha): JsonResponse
     {
         $request->validate([
-            'email'    => 'required|email',
-            'password' => 'required|string',
+            'email'       => 'required|email',
+            'password'    => 'required|string',
+            'device_name' => 'nullable|string|max:100',
         ]);
 
         $email   = strtolower((string) $request->input('email'));
@@ -257,7 +261,101 @@ class AuthController extends Controller
      */
     private function respondWithSession(Request $request, User $user): JsonResponse
     {
-        $token = $user->createToken('fitaccess-token', [$user->role])->plainTextToken;
+        if (in_array($user->role, $this->mfaRequiredRoles(), true)) {
+            Auth::logout();
+            return $this->beginMfaChallenge($user);
+        }
+
+        return $this->respondWithSession($request, $user);
+    }
+
+    /**
+     * Roles that must complete TOTP two-factor authentication to log in.
+     */
+    private function mfaRequiredRoles(): array
+    {
+        return array_merge(User::ADMIN_ROLES, self::MFA_EXTRA_ROLES);
+    }
+
+    /**
+     * Password was correct but the account requires MFA before a session
+     * token is issued. The QR code is only shown the first time (until the
+     * user confirms a code); after that the saved secret is reused and the
+     * user just enters the 6-digit code from their authenticator app.
+     */
+    private function beginMfaChallenge(User $user): JsonResponse
+    {
+        $mfaToken = Str::random(64);
+        Cache::put("mfa_pending:{$mfaToken}", $user->id, now()->addMinutes(10));
+
+        // Already enrolled: skip the QR and ask for the code only
+        if ($user->google2fa_enabled && $user->google2fa_secret) {
+            return response()->json([
+                'mfa_setup_required' => true,
+                'mfa_enrolled'       => true,
+                'mfa_token'          => $mfaToken,
+                'qr_code'            => null,
+                'secret'             => null,
+                'message'            => 'Enter the 6-digit code from your authenticator app to finish signing in.',
+            ]);
+        }
+
+        $tfa    = app(TwoFactorService::class);
+        $secret = $tfa->generateSecretKey();
+        $user->forceFill(['google2fa_secret' => $secret])->save();
+
+        return response()->json([
+            'mfa_setup_required' => true,
+            'mfa_enrolled'       => false,
+            'mfa_token'          => $mfaToken,
+            'qr_code'            => $tfa->getQrCodeDataUri($user->email, $secret),
+            'secret'             => $secret,
+            'message'            => 'Two-factor authentication is required for your role. Scan the QR code with an authenticator app (Google Authenticator, Authy, etc.), then enter the 6-digit code to finish signing in.',
+        ]);
+    }
+
+    /**
+     * Step 2 of login: verify the code (against the new secret on first
+     * setup, or the saved one afterwards) and issue the real session.
+     */
+    public function mfaSetupConfirm(Request $request): JsonResponse
+    {
+        $request->validate([
+            'mfa_token' => 'required|string',
+            'code'      => 'required|digits:6',
+        ]);
+
+        $pendingKey = "mfa_pending:{$request->input('mfa_token')}";
+        $userId     = Cache::get($pendingKey);
+        $user       = $userId ? User::find($userId) : null;
+
+        if (!$user || !$user->google2fa_secret) {
+            return response()->json(['message' => 'This login session has expired. Please sign in again.'], 422);
+        }
+
+        $tfa = app(TwoFactorService::class);
+        if (!$tfa->verifyKey($user->google2fa_secret, $request->input('code'))) {
+            return response()->json(['message' => 'Invalid authentication code. Please try again.'], 422);
+        }
+
+        $user->forceFill(['google2fa_enabled' => true])->save();
+
+        Cache::forget($pendingKey);
+
+        return $this->respondWithSession($request, $user);
+    }
+
+    /**
+     * Issues the Sanctum token and builds the standard post-login payload.
+     * Shared by direct login (no MFA required) and both MFA completion steps.
+     */
+    private function respondWithSession(Request $request, User $user): JsonResponse
+    {
+        // Server-side expiry: idle timeout + absolute lifetime by account type;
+        // members also get a rotating refresh token (15-minute access token).
+        $pair    = app(SessionTokenService::class)->issueSession($user, $request->input('device_name'), [$user->role]);
+        $session = $pair['access'];
+        $token   = $session->plainTextToken;
 
         // Load gym staff role if partner app user
         $gymStaff = null;
@@ -275,6 +373,9 @@ class AuthController extends Controller
                 'gym_id'               => $gymStaff?->gym_id,
             ]),
             'token'                 => $token,
+            'token_expires_at'      => $session->accessToken->expires_at?->toIso8601String(),
+            'idle_timeout_minutes'  => SessionTokenService::policyFor($user)['idle'],
+            ...self::refreshFields($pair),
             'permissions'           => $user->effectivePermissions(),
             'must_change_password'  => $gymStaff?->must_change_password ?? ($user->must_reset_password ?? false),
             'gym_staff_role'        => $gymStaff?->role,
@@ -331,7 +432,13 @@ class AuthController extends Controller
 
     public function logout(Request $request): JsonResponse
     {
-        $request->user()->currentAccessToken()->delete();
+        // Ends the whole session (a member's refresh token too), not just
+        // this access token.
+        $current = $request->user()->currentAccessToken();
+        if ($current instanceof PersonalAccessToken) {
+            app(SessionTokenService::class)->revokeSessionOf($current);
+        }
+
         return response()->json(['message' => 'Logged out successfully.']);
     }
 
@@ -402,26 +509,6 @@ class AuthController extends Controller
                     'phone'     => $request->phone,
                     'is_active' => false,
                 ]);
-
-                // Each branch gets its own login. They stay inactive until the
-                // admin approves the company (see Company::setAccountsActive).
-                foreach ($branches as $b) {
-                    $branch = \App\Models\CompanyBranch::create([
-                        'company_id'     => $company->id,
-                        'name'           => $b['branch_name'],
-                        'contact_person' => $b['contact_person'],
-                        'city'           => $b['city'],
-                        'sub_city'       => $b['sub_city'],
-                        'address'        => $b['woreda'],
-                        'landmark'       => $b['landmark'],
-                        'phone'          => $b['contact_phone'],
-                        'is_active'      => true,
-                    ]);
-                    \App\Services\BranchLoginService::createLogin($b, 'company_hr', [
-                        'company_id'        => $company->id,
-                        'company_branch_id' => $branch->id,
-                    ]);
-                }
 
                 $token = $user->createToken('fitaccess-token')->plainTextToken;
 
@@ -678,6 +765,10 @@ class AuthController extends Controller
         \App\Models\GymStaff::where('user_id', $user->id)
         ->update(['must_change_password' => false]);
 
+        // A new password ends every other session, e.g. one opened with the
+        // old (possibly stolen) password.
+        app(SessionTokenService::class)->revokeOtherSessions($user);
+
         return response()->json(['message' => 'Password changed successfully.']);
     }
 
@@ -702,10 +793,14 @@ class AuthController extends Controller
     $user->member_code = 'FA-' . str_pad($user->id, 5, '0', STR_PAD_LEFT);
     $user->save();
 
-    $token = $user->createToken('fitaccess-token', ['member'])->plainTextToken;
+    $pair    = app(SessionTokenService::class)->issueSession($user, $request->input('device_name'), ['member']);
+    $session = $pair['access'];
 
     return response()->json([
-        'token' => $token,
+        'token'                => $session->plainTextToken,
+        'token_expires_at'     => $session->accessToken->expires_at?->toIso8601String(),
+        'idle_timeout_minutes' => SessionTokenService::policyFor($user)['idle'],
+        ...self::refreshFields($pair),
         'user'  => [
             'id'                   => $user->id,
             'name'                 => $user->name,
@@ -738,6 +833,8 @@ class AuthController extends Controller
             'password'            => Hash::make($request->password),
             'must_reset_password' => false,
         ]);
+
+        app(SessionTokenService::class)->revokeOtherSessions($user);
 
         return response()->json([
             'message'     => 'Password updated successfully.',
@@ -802,6 +899,118 @@ class AuthController extends Controller
             'password_reset_expires_at' => null,
         ]);
 
+        // Whoever triggered a reset may not be the only one holding sessions.
+        app(SessionTokenService::class)->revokeAll($user);
+
         return response()->json(['message' => 'Password has been reset. You can now log in.']);
+    }
+
+    // ── Sessions ──────────────────────────────────────────────────────────────
+
+    /** The caller's active sessions (devices), newest activity first. */
+    public function sessions(Request $request): JsonResponse
+    {
+        $user      = $request->user();
+        $current   = $user->currentAccessToken();
+        $currentId = $current instanceof PersonalAccessToken ? $current->id : null;
+
+        $currentFamily = $current instanceof PersonalAccessToken ? $current->family_id : null;
+        $tokens        = $user->tokens()->orderByDesc('last_used_at')->get()
+            ->each(fn (PersonalAccessToken $t) => $t->setRelation('tokenable', $user));
+
+        // Last activity of a member session = its most recent access token.
+        $familyLastUsed = $tokens->whereNotNull('family_id')->groupBy('family_id')
+            ->map(fn ($group) => $group->max('last_used_at'));
+
+        // One row per session: a member session (token family) is shown by
+        // its live refresh token; other accounts by their access token.
+        $sessions = $tokens
+            ->filter(fn (PersonalAccessToken $t) => $t->family_id
+                ? SessionTokenService::refreshTokenUsable($t) && !$t->used_at
+                : SessionTokenService::isStillValid($t))
+            ->map(fn (PersonalAccessToken $t) => [
+                'id'           => $t->id,
+                'device'       => $t->name,
+                'created_at'   => ($t->family_id && $t->session_started_at ? \Illuminate\Support\Carbon::parse($t->session_started_at) : $t->created_at)?->toIso8601String(),
+                'last_used_at' => ($t->family_id ? ($familyLastUsed[$t->family_id] ?? null) : $t->last_used_at)?->toIso8601String(),
+                'expires_at'   => SessionTokenService::expiresAt($t)?->toIso8601String(),
+                'current'      => $t->family_id ? $t->family_id === $currentFamily : $t->id === $currentId,
+            ])
+            ->values();
+
+        return response()->json(['data' => $sessions]);
+    }
+
+    /** Ends one of the caller's own sessions. */
+    public function revokeSession(Request $request, int $tokenId): JsonResponse
+    {
+        $token = $request->user()->tokens()->whereKey($tokenId)->first();
+
+        if (!$token) {
+            return response()->json(['message' => 'Session not found.'], 404);
+        }
+
+        app(SessionTokenService::class)->revokeSessionOf($token);
+
+        return response()->json(['message' => 'Session signed out.']);
+    }
+
+    /** "Sign out everywhere": ends all of the caller's sessions, this one included. */
+    public function logoutAll(Request $request): JsonResponse
+    {
+        $count = app(SessionTokenService::class)->revokeAll($request->user());
+
+        return response()->json(['message' => 'Signed out of all devices.', 'revoked' => $count]);
+    }
+
+    /**
+     * Members: exchange a refresh token for a new access + refresh pair.
+     * The refresh token is single-use; presenting a used one ends the
+     * whole session (it was copied).
+     */
+    public function refresh(Request $request): JsonResponse
+    {
+        $request->validate(['refresh_token' => 'required|string|max:200']);
+
+        $pair = app(SessionTokenService::class)->refresh($request->input('refresh_token'));
+        if (!$pair) {
+            return response()->json(['message' => 'Session expired. Please sign in again.'], 401);
+        }
+
+        return response()->json([
+            'token'            => $pair['access']->plainTextToken,
+            'token_expires_at' => $pair['access']->accessToken->expires_at?->toIso8601String(),
+            ...self::refreshFields($pair),
+        ]);
+    }
+
+    /**
+     * Members: sign out with the refresh token, which works even when the
+     * access token has already expired. Always 200, so it can't be used to
+     * probe for valid tokens.
+     */
+    public function revokeRefreshToken(Request $request): JsonResponse
+    {
+        $request->validate(['refresh_token' => 'required|string|max:200']);
+
+        $token = PersonalAccessToken::findToken($request->input('refresh_token'));
+        if ($token && SessionTokenService::isRefreshToken($token)) {
+            app(SessionTokenService::class)->revokeSessionOf($token);
+        }
+
+        return response()->json(['message' => 'Logged out successfully.']);
+    }
+
+    /** @param array{access: \Laravel\Sanctum\NewAccessToken, refresh: ?\Laravel\Sanctum\NewAccessToken} $pair */
+    private static function refreshFields(array $pair): array
+    {
+        if (!$pair['refresh']) {
+            return [];
+        }
+
+        return [
+            'refresh_token'      => $pair['refresh']->plainTextToken,
+            'refresh_expires_at' => $pair['refresh']->accessToken->expires_at?->toIso8601String(),
+        ];
     }
 }
