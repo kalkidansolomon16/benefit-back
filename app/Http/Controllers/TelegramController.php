@@ -258,7 +258,7 @@ class TelegramController extends Controller
                         return;
                     }
                     $company->update(['business_license_status' => 'approved', 'is_active' => true]);
-                    $company->hrUser?->update(['is_active' => true]);
+                    $company->setAccountsActive(true);
                     $this->telegram->notifyUserApproved($company->hrUser, 'company');
                     if ($company->hrUser?->email) {
                         Mail::to($company->hrUser->email)
@@ -326,6 +326,16 @@ class TelegramController extends Controller
                     // Admin: already admin-approved
                     if ($isAdmin && $employee->admin_approval_status === 'approved') {
                         $this->telegram->answerCallbackQuery($callbackId, '✅ Already fully approved.', false);
+                        return;
+                    }
+                    // Admin: employee must have paid before they can be approved
+                    if (!$isHR && $employee->payment_status !== 'paid') {
+                        $this->telegram->answerCallbackQuery($callbackId, '💳 Payment not received yet — approve it in the portal once paid.', true);
+                        return;
+                    }
+                    // Admin: cannot activate before the company (HR) has approved
+                    if (!$isHR && ($employee->registration_status ?? 'approved') !== 'approved') {
+                        $this->telegram->answerCallbackQuery($callbackId, '⏳ Waiting for company (HR) approval first.', true);
                         return;
                     }
 
@@ -414,34 +424,24 @@ class TelegramController extends Controller
                         $this->telegram->answerCallbackQuery($callbackId, 'Already processed.', true);
                         return;
                     }
-                    // Note: full gym creation requires a tier — quick-approve sets 'basic' as default
-                    DB::transaction(function () use ($app) {
-                        \App\Models\Gym::create([
-                            'name'              => $app->facility_name,
-                            'contact_person'    => $app->contact_person,
-                            'contact_phone'     => $app->contact_phone,
-                            'contact_email'     => $app->contact_email,
-                            'address'           => $app->woreda,
-                            'city'              => $app->city,
-                            'tier'              => 'basic',
-                            'max_capacity'      => $app->max_capacity,
-                            'facilities'        => array_merge($app->categories ?? [], $app->amenities ?? []),
-                            'opening_hours'     => [],
-                            'is_active'         => true,
-                            'is_partner'        => true,
-                            'partnership_start' => now()->toDateString(),
-                        ]);
-                        $app->update(['status' => 'approved']);
-                        $app->user?->update(['is_active' => true]);
-                    });
-                    $this->telegram->notifyUserApproved($app->user, 'partner');
-                    if ($app->user?->email) {
-                        Mail::to($app->user->email)
-                            ->send(new \App\Mail\AccountApprovedMail($app->user));
+                    // Quick-approve: every location gets the default 'basic' tier.
+                    // Reuses the portal's approval logic so branches are created too.
+                    $approveRequest = new \Illuminate\Http\Request([
+                        'tier'         => 'basic',
+                        'branch_tiers' => array_fill(0, count($app->branches ?? []), 'basic'),
+                    ]);
+                    $approveResponse = app(\App\Http\Controllers\PartnerApplicationController::class)
+                        ->approve($approveRequest, $app);
+                    if ($approveResponse->getStatusCode() >= 400) {
+                        $this->telegram->answerCallbackQuery($callbackId, '⚠️ Could not approve. Please use the portal.', true);
+                        return;
                     }
                     $this->telegram->answerCallbackQuery($callbackId, '✅ Gym approved (tier: basic)!');
                     $this->telegram->editMessageText($chatId, $messageId,
-                        "✅ <b>Gym approved</b> by {$actor->name}.\n<b>{$app->facility_name}</b> (tier: basic)\n\n"
+                        "✅ <b>Gym approved</b> by {$actor->name}.
+<b>{$app->facility_name}</b> (tier: basic)
+
+"
                         . "⚠️ Visit the admin portal to update the tier if needed."
                     );
                     break;

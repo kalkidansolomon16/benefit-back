@@ -39,12 +39,14 @@ use Illuminate\Support\Facades\Route;
 Route::prefix('v1')->group(function () {
 
     // ── Auth & public ────────────────────────────────────────────────
-    Route::post('auth/login',             [AuthController::class, 'login']);
-    Route::post('auth/register/company',  [AuthController::class, 'registerCompany']);
-    Route::post('auth/register/employee', [AuthController::class, 'registerEmployee']);
-    Route::post('auth/register/partner',  [AuthController::class, 'registerPartner']);
+    Route::post('auth/login',             [AuthController::class, 'login'])->middleware('throttle:login');
+    Route::post('auth/mfa/setup/confirm', [AuthController::class, 'mfaSetupConfirm'])->middleware('throttle:login');
+    Route::post('auth/register/company',  [AuthController::class, 'registerCompany'])->middleware('throttle:register');
+    Route::post('auth/register/employee', [AuthController::class, 'registerEmployee'])->middleware('throttle:register');
+    Route::post('auth/register/partner',  [AuthController::class, 'registerPartner'])->middleware('throttle:register');
     Route::get('public/companies',        [CompanyController::class, 'publicList']);
-    Route::post('auth/register/member', [\App\Http\Controllers\AuthController::class, 'registerMember']);
+    Route::get('public/companies/{company}/branches', [CompanyController::class, 'publicBranches']);
+    Route::post('auth/register/member', [\App\Http\Controllers\AuthController::class, 'registerMember'])->middleware('throttle:register');
 
     // Password reset
     Route::post('auth/forgot-password', function (\Illuminate\Http\Request $request) {
@@ -63,7 +65,7 @@ Route::prefix('v1')->group(function () {
         $request->validate([
             'token'    => 'required',
             'email'    => 'required|email',
-            'password' => 'required|min:8|confirmed',
+            'password' => ['required', 'confirmed', new \App\Rules\StrongPassword()],
         ]);
 
         $status = \Illuminate\Support\Facades\Password::reset(
@@ -104,6 +106,9 @@ Route::prefix('v1')->group(function () {
     // ── Telegram webhook (public — Telegram must reach this) ─────────
     Route::post('telegram/webhook',        [TelegramController::class, 'webhook']);
 
+    // ── Chapa payment webhook (public — Chapa must reach this; signature-verified) ─
+    Route::post('chapa/webhook',           [ChapaController::class, 'webhook'])->middleware('throttle:30,1');
+
     // ── File serving (public — filenames are random hashes, no auth needed) ─
     Route::get('files/{path}', function (string $path) {
         // Prevent directory traversal
@@ -118,13 +123,14 @@ Route::prefix('v1')->group(function () {
     })->where('path', '.*');
 
     // ── Auth & public ────────────────────────────────────────────────
-    Route::post('auth/login',              [AuthController::class, 'login']);
+    Route::post('auth/login',              [AuthController::class, 'login'])->middleware('throttle:login');
     Route::post('auth/forgot-password',    [AuthController::class, 'forgotPassword']);
     Route::post('auth/reset-password',     [AuthController::class, 'resetPassword']);
-    Route::post('auth/register/company',   [AuthController::class, 'registerCompany']);
-    Route::post('auth/register/employee',  [AuthController::class, 'registerEmployee']);
-    Route::post('auth/register/partner',   [AuthController::class, 'registerPartner']);
+    Route::post('auth/register/company',   [AuthController::class, 'registerCompany'])->middleware('throttle:register');
+    Route::post('auth/register/employee',  [AuthController::class, 'registerEmployee'])->middleware('throttle:register');
+    Route::post('auth/register/partner',   [AuthController::class, 'registerPartner'])->middleware('throttle:register');
     Route::get('public/companies',         [CompanyController::class, 'publicList']);
+    Route::get('public/companies/{company}/branches', [CompanyController::class, 'publicBranches']);
     Route::get('public/plans',             [MembershipPlanController::class, 'index']);
 
     // ── Protected ───────────────────────────────────────────────────
@@ -217,6 +223,7 @@ Route::prefix('v1')->group(function () {
             Route::post('/',                                       [AdminUserController::class, 'store']);
             Route::patch('{user}/toggle-active',                   [AdminUserController::class, 'toggleActive']);
             Route::post('{user}/reset-temp',                       [AdminUserController::class, 'resetTemp']);
+            Route::post('{user}/reset-2fa',                        [AdminUserController::class, 'resetTwoFactor']);
             Route::delete('{user}',                                [AdminUserController::class, 'destroy']);
             Route::get('permissions',                              [AdminUserController::class, 'permissions']);
             Route::put('permissions/roles/{role}',                 [AdminUserController::class, 'updateRolePermissions']);
@@ -250,7 +257,7 @@ Route::prefix('v1')->group(function () {
         });
 
         // ── Gym Team & Permissions ────────────────────────────────────
-        Route::prefix('partner/team')->group(function () {
+        Route::prefix('partner/team')->middleware('branch.write')->group(function () {
             Route::get('/',                                        [GymTeamController::class, 'index']);
             Route::post('/',                                       [GymTeamController::class, 'store']);
             Route::patch('{user}/toggle-active',                   [GymTeamController::class, 'toggleActive']);
@@ -262,7 +269,7 @@ Route::prefix('v1')->group(function () {
         });
 
         // ── Gym Roles (dynamic) ───────────────────────────────────────
-        Route::prefix('partner/roles')->group(function () {
+        Route::prefix('partner/roles')->middleware('branch.write')->group(function () {
             Route::get('/',          [RolesController::class, 'gymIndex']);
             Route::post('/',         [RolesController::class, 'gymStore']);
             Route::delete('{role}',  [RolesController::class, 'gymDestroy']);
@@ -300,21 +307,29 @@ Route::prefix('v1')->group(function () {
         Route::post('companies/admin-create', [CompanyController::class, 'adminCreate']);
         Route::apiResource('companies', CompanyController::class);
         Route::patch('companies/{company}/toggle-active',      [CompanyController::class, 'toggleActive']);
+        Route::post('companies/{company}/reset-2fa',           [AdminUserController::class, 'resetCompanyTwoFactor']);
+        Route::get('companies/{company}/branches',             [AdminUserController::class, 'companyBranches']);
+        Route::post('companies/{company}/branches/{branch}/reset-2fa', [AdminUserController::class, 'resetCompanyBranchTwoFactor']);
         Route::patch('companies/{company}/license-status',     [CompanyController::class, 'updateLicenseStatus']);
         Route::post('companies/{company}/deactivate',          [AdminBillingController::class, 'deactivateCompany']);
 
         // Employees
         Route::get( 'employees/pending-admin-approval',    [EmployeeController::class, 'pendingAdminApproval']);
+        Route::post('employees/import',                    [EmployeeController::class, 'importEmployees']);
+        Route::post('employees/bulk-admin-approve',        [EmployeeController::class, 'bulkAdminApprove']);
+        Route::post('employees/bulk-admin-reject',         [EmployeeController::class, 'bulkAdminReject']);
         Route::post('employees/{employee}/admin-approve',  [EmployeeController::class, 'adminApprove']);
         Route::post('employees/{employee}/admin-reject',   [EmployeeController::class, 'adminReject']);
         Route::apiResource('employees', EmployeeController::class);
         Route::post('employees/{employee}/enroll',        [EmployeeController::class, 'enroll']);
         Route::post('employees/{employee}/toggle-active', [EmployeeController::class, 'toggleActive']);
+        Route::post('employees/{employee}/reset-2fa',     [AdminUserController::class, 'resetEmployeeTwoFactor']);
         Route::post('employees/{employee}/ban',           [EmployeeController::class, 'ban']);
         Route::post('employees/{employee}/unban',         [EmployeeController::class, 'unban']);
 
         // Gyms
         Route::apiResource('gyms', GymController::class);
+        Route::post('gyms/{gym}/reset-2fa',                     [AdminUserController::class, 'resetGymTwoFactor']);
 
         // Partner Applications
         Route::get('partner-applications',                              [PartnerApplicationController::class, 'index']);
@@ -334,7 +349,7 @@ Route::prefix('v1')->group(function () {
         // Check-ins
         Route::get('checkins',                     [CheckinController::class, 'index']);
         Route::post('checkins',                    [CheckinController::class, 'store']);
-        Route::post('checkins/scan',               [CheckinController::class, 'scan']);
+        Route::post('checkins/scan',               [CheckinController::class, 'scan'])->middleware('branch.write');
         Route::get('checkins/{checkin}',           [CheckinController::class, 'show']);
         Route::post('checkins/{checkin}/checkout', [CheckinController::class, 'checkout']);
 
@@ -360,32 +375,47 @@ Route::prefix('v1')->group(function () {
 
         // ── Employee portal ────────────────────────────────────────
         Route::prefix('employee')->group(function () {
-            Route::get('dashboard', [EmployeePortalController::class, 'dashboard']);
             Route::get('dashboard',     [EmployeePortalController::class, 'dashboard']);
+            Route::patch('profile',     [EmployeePortalController::class, 'updateProfile']);
             Route::get('checkin-token', [CheckinController::class, 'token']);
             Route::get('gyms',          [CheckinController::class, 'myGyms']);
+            Route::get('gyms/{gym}/occupants', [CheckinController::class, 'occupants']);
+            Route::get('gym-privacy',   [EmployeePortalController::class, 'gymPrivacy']);
+            Route::put('gym-privacy',   [EmployeePortalController::class, 'updateGymPrivacy']);
             Route::post('select-gym',   [CheckinController::class, 'selectGym']);
         });
 
         // ── Partner / Gym portal (web portal routes — distinct from mobile partner routes above) ───
-        Route::prefix('partner-portal')->group(function () {
+        Route::prefix('partner-portal')->middleware('branch.write')->group(function () {
             Route::get('dashboard',          [PartnerPortalController::class, 'dashboard']);
             Route::get('expected-visitors',  [CheckinController::class, 'expectedVisitors']);
             Route::put('profile',            [GymUpgradeController::class, 'updateProfile']);
             Route::post('upgrade-request',   [GymUpgradeController::class, 'submitRequest']);
             Route::get('upgrade-requests',   [GymUpgradeController::class, 'myRequests']);
+            Route::get('branches',           [PartnerApplicationController::class, 'myBranches']);
+            Route::post('branches',          [PartnerApplicationController::class, 'requestBranch']);
+            Route::post('branches/{gym}/reset-password', [PartnerApplicationController::class, 'resetBranchPassword']);
         });
 
         // ── Company HR portal ──────────────────────────────────────
         Route::prefix('hr')->group(function () {
             Route::get('my-company',                          [HRController::class, 'myCompany']);
+            Route::get('branches',                            [\App\Http\Controllers\HRBranchController::class, 'index']);
+            Route::post('branches',                           [\App\Http\Controllers\HRBranchController::class, 'store']);
+            Route::patch('branches/{branch}',                 [\App\Http\Controllers\HRBranchController::class, 'update']);
+            Route::delete('branches/{branch}',                [\App\Http\Controllers\HRBranchController::class, 'destroy']);
+            Route::post('branches/{branch}/reset-password',   [\App\Http\Controllers\HRBranchController::class, 'resetPassword']);
             Route::get('dashboard',                           [HRController::class, 'dashboard']);
             Route::get('employees',                           [HRController::class, 'employees']);
             Route::post('employees',                          [HRController::class, 'registerEmployee']);
+            Route::post('employees/import',                   [HRController::class, 'importEmployees']);
+            Route::post('employees/bulk-approve',             [HRController::class, 'bulkApproveEmployees']);
+            Route::post('employees/bulk-reject',              [HRController::class, 'bulkRejectEmployees']);
             Route::post('employees/{employee}/approve',       [HRController::class, 'approveEmployee']);
             Route::post('employees/{employee}/reject',        [HRController::class, 'rejectEmployee']);
             Route::post('employees/{employee}/ban',           [HRController::class, 'banEmployee']);
             Route::post('employees/{employee}/unban',         [HRController::class, 'unbanEmployee']);
+            Route::post('employees/{employee}/reset-2fa',     [HRController::class, 'resetEmployeeTwoFactor']);
 
             // Billing (company-side)
             Route::get('billing/invoices',                                      [CompanyBillingController::class, 'index']);

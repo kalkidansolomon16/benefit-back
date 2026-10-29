@@ -6,6 +6,8 @@ use App\Http\Requests\StoreEmployeeRequest;
 use App\Http\Resources\EmployeeResource;
 use App\Models\AuditLog;
 use App\Models\Employee;
+use App\Models\User;
+use App\Services\EmployeeImportService;
 use App\Services\TelegramService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
@@ -16,7 +18,7 @@ class EmployeeController extends Controller
     public function index(Request $request): AnonymousResourceCollection
     {
         $employees = Employee::query()
-            ->with(['user', 'company', 'activeMembership.gym'])
+            ->with(['user', 'company', 'activeMembership.gym', 'activeMembership.plan'])
             ->when($request->company_id, fn($q) => $q->where('company_id', $request->company_id))
             ->when($request->level, fn($q) => $q->where('level', $request->level))
             ->when($request->is_enrolled !== null, fn($q) => $q->where('is_enrolled', $request->boolean('is_enrolled')))
@@ -32,6 +34,24 @@ class EmployeeController extends Controller
             ->paginate(min((int) ($request->per_page ?? 15), 500));
 
         return EmployeeResource::collection($employees);
+    }
+
+    /** ── Admin-only: bulk-create employees from a CSV file ── */
+    public function importEmployees(Request $request, EmployeeImportService $importer): JsonResponse
+    {
+        abort_unless(in_array($request->user()->role, User::ADMIN_ROLES), 403);
+
+        $request->validate([
+            'file' => 'required|file|mimes:csv,txt|max:5120',
+        ]);
+
+        $result = $importer->import($request->file('file'));
+
+        return response()->json([
+            'message' => count($result['created']) . ' employee(s) imported, ' . count($result['failed']) . ' row(s) failed.',
+            'created' => $result['created'],
+            'failed'  => $result['failed'],
+        ]);
     }
 
     public function store(StoreEmployeeRequest $request): JsonResponse
@@ -100,6 +120,18 @@ class EmployeeController extends Controller
         }
 
         $newState = !$user->is_active;
+
+        // Two-step approval: the company (HR) must approve before the account can be activated
+        if ($newState && ($employee->registration_status ?? 'approved') !== 'approved') {
+            return response()->json(['message' => 'This employee has not been approved by their company (HR) yet.'], 422);
+        }
+
+        // Activating an employee who is still awaiting admin approval counts as approving them,
+        // so the same payment rule applies
+        if ($newState && $employee->admin_approval_status === 'pending' && $employee->payment_status !== 'paid') {
+            return response()->json(['message' => 'Payment has not been received for this employee yet. They can only be approved once their payment status is Paid.'], 422);
+        }
+
         $user->update(['is_active' => $newState]);
 
         // Keep admin_approval_status in sync so the approval queue stays clean
@@ -184,13 +216,17 @@ class EmployeeController extends Controller
     /** ── Admin-only: approve employee + set payment status ── */
     public function adminApprove(Request $request, Employee $employee): JsonResponse
     {
-        $request->validate([
-            'payment_status' => 'required|in:paid,unpaid',
-        ]);
+        if (($employee->registration_status ?? 'approved') !== 'approved') {
+            return response()->json(['message' => 'This employee has not been approved by their company (HR) yet.'], 422);
+        }
+
+        // Payment must already be recorded (invoice paid) before the admin can approve
+        if ($employee->payment_status !== 'paid') {
+            return response()->json(['message' => 'Payment has not been received for this employee yet. They can only be approved once their payment status is Paid.'], 422);
+        }
 
         $employee->update([
             'admin_approval_status' => 'approved',
-            'payment_status'        => $request->payment_status,
             'is_enrolled'           => true,
             'enrolled_at'           => $employee->enrolled_at ?? now(),
         ]);
@@ -200,16 +236,15 @@ class EmployeeController extends Controller
 
         AuditLog::record('updated', $employee, ['admin_approval_status' => 'pending'], [
             'admin_approval_status' => 'approved',
-            'payment_status'        => $request->payment_status,
         ]);
 
         // Email first — most critical, must not be blocked by Telegram
         if ($employee->user?->email) {
             try {
-                \Illuminate\Support\Facades\Log::info('[FitAccess] Sending approval email to: ' . $employee->user->email . ' | mailer: ' . config('mail.default') . ' | host: ' . config('mail.mailers.smtp.host'));
+                \Illuminate\Support\Facades\Log::info('[FitAccess] Sending approval email to: ' . $this->maskEmail($employee->user->email) . ' | mailer: ' . config('mail.default') . ' | host: ' . config('mail.mailers.smtp.host'));
                 \Illuminate\Support\Facades\Mail::to($employee->user->email)
                     ->send(new \App\Mail\AccountApprovedMail($employee->user));
-                \Illuminate\Support\Facades\Log::info('[FitAccess] Approval email sent OK to: ' . $employee->user->email);
+                \Illuminate\Support\Facades\Log::info('[FitAccess] Approval email sent OK to: ' . $this->maskEmail($employee->user->email));
             } catch (\Throwable $e) {
                 \Illuminate\Support\Facades\Log::error('[FitAccess] Employee approval email FAILED [' . get_class($e) . ']: ' . $e->getMessage());
             }
@@ -275,5 +310,84 @@ class EmployeeController extends Controller
         }
 
         return response()->json(['message' => 'Employee rejected at admin stage.']);
+    }
+
+    /** ── Admin-only: approve many employees at once ── */
+    public function bulkAdminApprove(Request $request): JsonResponse
+    {
+        $data = $request->validate([
+            'ids'            => 'required|array|min:1|max:200',
+            'ids.*'          => 'integer',
+        ]);
+
+        return $this->runBulk($data['ids'], function (Employee $e) use ($request) {
+            $response = $this->adminApprove($request, $e);
+            if ($response->getStatusCode() >= 400) {
+                throw new \RuntimeException($response->getData()->message ?? 'Could not be approved');
+            }
+        }, 'approved');
+    }
+
+    /** ── Admin-only: reject many employees at once ── */
+    public function bulkAdminReject(Request $request): JsonResponse
+    {
+        $data = $request->validate([
+            'ids'    => 'required|array|min:1|max:200',
+            'ids.*'  => 'integer',
+            'reason' => 'required|string|max:500',
+        ]);
+
+        return $this->runBulk($data['ids'], function (Employee $e) use ($data) {
+            $this->adminReject(new Request(['reason' => $data['reason']]), $e);
+        }, 'rejected');
+    }
+
+    /** Applies $action to every id that is HR-approved and still awaiting admin review */
+    private function runBulk(array $ids, \Closure $action, string $verb): JsonResponse
+    {
+        $employees = Employee::with('user', 'company')
+            ->whereIn('id', $ids)
+            ->get();
+
+        $done = 0;
+        $failed = [];
+        foreach ($employees as $employee) {
+            if ($employee->admin_approval_status !== 'pending' || $employee->registration_status !== 'approved') {
+                $failed[] = ['id' => $employee->id, 'name' => $employee->user?->name, 'reason' => 'Not awaiting admin approval'];
+                continue;
+            }
+            try {
+                $action($employee);
+                $done++;
+            } catch (\Throwable $e) {
+                \Illuminate\Support\Facades\Log::error("Admin bulk {$verb} failed for employee {$employee->id}: " . $e->getMessage());
+                $failed[] = [
+                    'id'     => $employee->id,
+                    'name'   => $employee->user?->name,
+                    'reason' => $e instanceof \RuntimeException ? 'Payment not received' : 'Could not be processed',
+                ];
+            }
+        }
+
+        $missing = count($ids) - $employees->count();
+        if ($missing > 0) {
+            $failed[] = ['id' => null, 'name' => null, 'reason' => "{$missing} not found"];
+        }
+
+        return response()->json([
+            'message' => "{$done} employee(s) {$verb}." . ($failed ? ' ' . count($failed) . ' skipped.' : ''),
+            'done'    => $done,
+            'failed'  => $failed,
+        ]);
+    }
+
+    private function maskEmail(string $email): string
+    {
+        [$local, $domain] = array_pad(explode('@', $email, 2), 2, '');
+        if ($local === '') {
+            return $email;
+        }
+        $visible = mb_substr($local, 0, 1);
+        return $visible . str_repeat('*', max(strlen($local) - 1, 1)) . '@' . $domain;
     }
 }

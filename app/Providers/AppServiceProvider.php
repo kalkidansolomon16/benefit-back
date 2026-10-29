@@ -10,6 +10,9 @@ use App\Models\User;
 use Dedoc\Scramble\Scramble;
 use Dedoc\Scramble\Support\Generator\OpenApi;
 use Dedoc\Scramble\Support\Generator\SecurityScheme;
+use Illuminate\Cache\RateLimiting\Limit;
+use Illuminate\Http\Request;
+use Illuminate\Support\Facades\RateLimiter;
 
 class AppServiceProvider extends ServiceProvider
 {
@@ -38,5 +41,15 @@ class AppServiceProvider extends ServiceProvider
             );
         });
         Builder::defaultStringLength(191);
+
+        RateLimiter::for('login', function (Request $request) {
+            $key = strtolower((string) $request->input('email')) . '|' . $request->ip();
+            return Limit::perMinute(5)->by($key);
+        });
+
+        RateLimiter::for('register', function (Request $request) {
+            $key = strtolower((string) $request->input('email')) . '|' . $request->ip();
+            return Limit::perMinute(3)->by($key);
+        });
     }
 }

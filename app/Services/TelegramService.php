@@ -182,7 +182,7 @@ class TelegramService
      * Find the primary HR user for a company via email match (how hrUser() relationship works).
      * The company_hr user is NOT stored with company_id on the users table — only linked by email.
      */
-    private function getCompanyHRUsers(int $companyId): \Illuminate\Database\Eloquent\Collection
+    private function getCompanyHRUsers(int $companyId, ?int $branchId = null): \Illuminate\Database\Eloquent\Collection
     {
         $company = \App\Models\Company::find($companyId);
         if (!$company) return collect();
@@ -198,12 +198,24 @@ class TelegramService
             ->whereNotNull('telegram_chat_id')
             ->get();
 
-        return $primaryHR->merge($subRoles)->unique('id');
+        $result = $primaryHR->merge($subRoles);
+
+        // A branch's own login also hears about its own employees / invoices
+        if ($branchId) {
+            $result = $result->merge(
+                User::where('company_id', $companyId)
+                    ->where('company_branch_id', $branchId)
+                    ->whereNotNull('telegram_chat_id')
+                    ->get()
+            );
+        }
+
+        return $result->unique('id');
     }
 
     public function notifyHRNewEmployee(Employee $employee): void
     {
-        $hrUsers    = $this->getCompanyHRUsers($employee->company_id);
+        $hrUsers    = $this->getCompanyHRUsers($employee->company_id, $employee->company_branch_id);
         $adminUsers = User::whereIn('role', ['super_admin', 'fitaccess_admin'])
             ->whereNotNull('telegram_chat_id')->get();
 
@@ -242,7 +254,7 @@ class TelegramService
 
     public function notifyHREmployeeApprovedByAdmin(Employee $employee): void
     {
-        $hrUsers = $this->getCompanyHRUsers($employee->company_id);
+        $hrUsers = $this->getCompanyHRUsers($employee->company_id, $employee->company_branch_id);
         $name    = $employee->user?->name ?? 'Unknown';
 
         foreach ($hrUsers as $hr) {
@@ -256,7 +268,7 @@ class TelegramService
 
     public function notifyHREmployeeRejectedByAdmin(Employee $employee, ?string $reason = null): void
     {
-        $hrUsers = $this->getCompanyHRUsers($employee->company_id);
+        $hrUsers = $this->getCompanyHRUsers($employee->company_id, $employee->company_branch_id);
         $name    = $employee->user?->name ?? 'Unknown';
         $text    = "❌ <b>Employee Rejected by Admin</b>\n\n<b>{$name}</b>'s account was rejected at the admin review stage.";
         if ($reason) $text .= "\n\n<b>Reason:</b> " . htmlspecialchars($reason);
@@ -325,7 +337,7 @@ class TelegramService
 
     public function notifyCompanyInvoiceSent(\App\Models\BillingInvoice $invoice): void
     {
-        $hrUsers = $this->getCompanyHRUsers($invoice->company_id);
+        $hrUsers = $this->getCompanyHRUsers($invoice->company_id, $invoice->branch_scoped ? $invoice->company_branch_id : null);
         if ($hrUsers->isEmpty()) return;
 
         $dueDate = $invoice->due_date
@@ -347,7 +359,7 @@ class TelegramService
 
     public function notifyCompanyPaymentVerified(\App\Models\BillingPayment $payment): void
     {
-        $hrUsers = $this->getCompanyHRUsers($payment->company_id);
+        $hrUsers = $this->getCompanyHRUsers($payment->company_id, $payment->invoice?->branch_scoped ? $payment->invoice->company_branch_id : null);
         if ($hrUsers->isEmpty()) return;
 
         $invoice = $payment->invoice;
@@ -366,7 +378,7 @@ class TelegramService
 
     public function notifyCompanyPaymentRejected(\App\Models\BillingPayment $payment, ?string $reason = null): void
     {
-        $hrUsers = $this->getCompanyHRUsers($payment->company_id);
+        $hrUsers = $this->getCompanyHRUsers($payment->company_id, $payment->invoice?->branch_scoped ? $payment->invoice->company_branch_id : null);
         if ($hrUsers->isEmpty()) return;
 
         $invoice = $payment->invoice;

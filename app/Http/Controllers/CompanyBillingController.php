@@ -17,16 +17,28 @@ class CompanyBillingController extends Controller
 
     private function getMyCompany(): Company
     {
-        $company = Company::where('contact_email', auth()->user()->email)->first();
+        $user    = auth()->user();
+        $company = ($user->company_id ? Company::find($user->company_id) : null)
+            ?? Company::where('contact_email', $user->email)->first();
         if (!$company) abort(403, 'No company linked to this account.');
         return $company;
     }
 
+    /** A branch login may only touch invoices issued to its own branch */
+    private function authorizeInvoice(BillingInvoice $invoice, Company $company): void
+    {
+        if ($invoice->company_id !== $company->id) abort(403);
+        if (!$invoice->isAccessibleBy(auth()->user())) {
+            abort(403, 'This invoice belongs to another branch. Only that branch or the head office can view or pay it.');
+        }
+    }
+
     /* ── Invoice list ─────────────────────────────────────────── */
 
-    public function index(): JsonResponse
+    public function index(Request $request): JsonResponse
     {
         $company = $this->getMyCompany();
+        $user    = auth()->user();
 
         // Auto-mark past-due sent invoices as overdue
         BillingInvoice::where('company_id', $company->id)
@@ -37,7 +49,13 @@ class CompanyBillingController extends Controller
 
         $invoices = BillingInvoice::where('company_id', $company->id)
             ->whereIn('status', ['sent', 'paid', 'overdue'])
-            ->with(['items', 'latestPayment', 'latestNegotiation'])
+            ->when($user->isCompanyBranchLogin(), fn($q) => $q
+                ->where('branch_scoped', true)
+                ->where('company_branch_id', $user->company_branch_id))
+            ->when(!$user->isCompanyBranchLogin() && $request->filled('company_branch_id'), fn($q) => $request->company_branch_id === 'main'
+                ? $q->where('branch_scoped', true)->whereNull('company_branch_id')
+                : $q->where('company_branch_id', (int) $request->company_branch_id))
+            ->with(['items', 'latestPayment', 'latestNegotiation', 'companyBranch:id,name'])
             ->latest()
             ->get()
             ->map(fn($inv) => $this->formatInvoice($inv));
@@ -50,7 +68,7 @@ class CompanyBillingController extends Controller
     public function show(BillingInvoice $billingInvoice): JsonResponse
     {
         $company = $this->getMyCompany();
-        if ($billingInvoice->company_id !== $company->id) abort(403);
+        $this->authorizeInvoice($billingInvoice, $company);
         if ($billingInvoice->status === 'draft') abort(404);
 
         // Auto-mark overdue on detail view too
@@ -61,7 +79,7 @@ class CompanyBillingController extends Controller
             $billingInvoice->refresh();
         }
 
-        $billingInvoice->load(['items', 'payments', 'latestNegotiation']);
+        $billingInvoice->load(['items', 'payments', 'latestNegotiation', 'companyBranch:id,name']);
 
         return response()->json($this->formatInvoice($billingInvoice, true));
     }
@@ -82,7 +100,7 @@ class CompanyBillingController extends Controller
     public function submitPayment(Request $request, BillingInvoice $billingInvoice): JsonResponse
     {
         $company = $this->getMyCompany();
-        if ($billingInvoice->company_id !== $company->id) abort(403);
+        $this->authorizeInvoice($billingInvoice, $company);
 
         if (!in_array($billingInvoice->status, ['sent', 'overdue'])) {
             return response()->json(['message' => 'This invoice is not awaiting payment.'], 422);
@@ -125,7 +143,7 @@ class CompanyBillingController extends Controller
     public function submitNegotiation(Request $request, BillingInvoice $billingInvoice): JsonResponse
     {
         $company = $this->getMyCompany();
-        if ($billingInvoice->company_id !== $company->id) abort(403);
+        $this->authorizeInvoice($billingInvoice, $company);
 
         if ($billingInvoice->status !== 'overdue') {
             return response()->json(['message' => 'Negotiation can only be requested for overdue invoices.'], 422);
@@ -174,6 +192,10 @@ class CompanyBillingController extends Controller
             'due_date'       => $inv->due_date?->toDateString(),
             'notes'          => $inv->notes,
             'status'         => $inv->status,
+            'branch_scoped'  => (bool) $inv->branch_scoped,
+            'branch'         => $inv->branch_scoped
+                ? ['id' => $inv->company_branch_id, 'name' => $inv->companyBranch?->name ?? 'Head office']
+                : null,
             'sent_at'        => $inv->sent_at?->toDateString(),
             'paid_at'        => $inv->paid_at?->toDateString(),
             'items'          => $inv->items?->map(fn($i) => [

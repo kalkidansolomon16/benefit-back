@@ -24,7 +24,7 @@
               Dear <strong>{{ $recipientName }}</strong>,
             </p>
             <p style="color:#374151;font-size:15px;line-height:1.6;margin:0 0 28px;">
-              {!! nl2br(e($message)) !!}
+              {!! nl2br(e($bodyText)) !!}
             </p>
 
             <!-- Button -->

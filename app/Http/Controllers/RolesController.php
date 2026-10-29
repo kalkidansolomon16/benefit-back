@@ -74,6 +74,7 @@ class RolesController extends Controller
 
     public function companyStore(Request $request): JsonResponse
     {
+        if (auth()->user()->isCompanyBranchLogin()) abort(403, 'Roles are managed by the head office.');
         $company = $this->getMyCompany();
         $request->validate(['label' => 'required|string|max:80']);
 
@@ -93,6 +94,7 @@ class RolesController extends Controller
 
     public function companyDestroy(Role $role): JsonResponse
     {
+        if (auth()->user()->isCompanyBranchLogin()) abort(403, 'Roles are managed by the head office.');
         $company = $this->getMyCompany();
         if ($role->company_id !== $company->id) abort(403);
         $this->assertDeletable($role, 'company');

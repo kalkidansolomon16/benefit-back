@@ -7,6 +7,7 @@ use App\Models\AuditLog;
 use App\Models\Company;
 use App\Models\Employee;
 use App\Models\User;
+use App\Services\EmployeeImportService;
 use App\Services\TelegramService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
@@ -14,6 +15,7 @@ use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Hash;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Storage;
+use Illuminate\Validation\Rule;
 
 class HRController extends Controller
 {
@@ -37,25 +39,53 @@ class HRController extends Controller
         return $company;
     }
 
-    private function levelToPackage(string $level): string
+    /** Branch this login belongs to; null for the head office (main company login) */
+    private function myBranchId(): ?int
     {
-        return match ($level) {
-            'chief'    => 'platinum',
-            'director' => 'basic_plus',
-            default    => 'basic',
-        };
+        return auth()->user()->company_branch_id ?: null;
     }
 
-    private function packageToLevel(string $package): string
+    /** Head office can manage every employee; a branch login only its own branch's */
+    private function canManage(Employee $employee): bool
     {
-        $norm = strtolower(preg_replace('/^[a-z]+_(?=basic|premium|platinum|gold|silver)/i', '', $package) ?? $package);
+        $mine = $this->myBranchId();
+        return $mine === null || (int) $employee->company_branch_id === $mine;
+    }
 
-        return match (true) {
-            in_array($norm, ['platinum', 'premium', 'gold']) => 'chief',
-            str_contains($norm, 'basic_plus')                => 'director',
-            str_contains($norm, 'manager')                   => 'manager',
-            default                                          => 'staff',
-        };
+    private function assertCanManage(Employee $employee): void
+    {
+        if (!$this->canManage($employee)) {
+            $owner = $employee->companyBranch?->name
+                ? "the {$employee->companyBranch->name} branch"
+                : 'the head office';
+            abort(403, "You can't approve, reject or change this employee: they belong to {$owner}. "
+                . 'Your branch account can only manage its own employees and view the others read-only.');
+        }
+    }
+
+    /**
+     * Narrow an employee query to one branch.
+     * ?branch_id=<id> picks a branch, ?branch_id=main the head office.
+     * With no param a branch login defaults to its own branch when $defaultOwn is set.
+     */
+    private function branchScope($query, Request $request, Company $company, bool $defaultOwn)
+    {
+        $raw = $request->query('branch_id');
+
+        if ($raw === 'all') {
+            return $query;
+        }
+        if ($raw === 'main') {
+            return $query->whereNull('company_branch_id');
+        }
+        if ($raw !== null && ctype_digit((string) $raw) && $company->branches()->whereKey((int) $raw)->exists()) {
+            return $query->where('company_branch_id', (int) $raw);
+        }
+        if ($raw === null && $defaultOwn && $this->myBranchId()) {
+            return $query->where('company_branch_id', $this->myBranchId());
+        }
+
+        return $query;
     }
 
     /* ── Company info ────────────────────────────────────────────── */
@@ -67,10 +97,10 @@ class HRController extends Controller
 
     /* ── HR Dashboard ────────────────────────────────────────────── */
 
-    public function dashboard(): JsonResponse
+    public function dashboard(Request $request): JsonResponse
     {
         $company   = $this->getMyCompany();
-        $employees = $company->employees()
+        $employees = $this->branchScope($company->employees(), $request, $company, true)
             ->with(['user:id,name,fan_number', 'activeMembership'])
             ->latest()
             ->get();
@@ -94,7 +124,7 @@ class HRController extends Controller
                 'id'          => $e->id,
                 'name'        => $e->user?->name,
                 'fan_number'  => $e->fan_number,
-                'package'     => $this->levelToPackage($e->level ?? 'staff'),
+                'package'     => Employee::levelToPackage($e->level ?? 'staff'),
                 'status'      => $e->activeMembership?->status ?? ($e->is_enrolled ? 'active' : 'inactive'),
                 'enrolled_at' => $e->enrolled_at?->toDateString() ?? $e->created_at->toDateString(),
             ])->values();
@@ -121,8 +151,8 @@ class HRController extends Controller
     {
         $company = $this->getMyCompany();
 
-        $employees = $company->employees()
-            ->with(['user:id,name,email,phone', 'activeMembership'])
+        $employees = $this->branchScope($company->employees(), $request, $company, false)
+            ->with(['user:id,name,email,phone', 'activeMembership', 'companyBranch:id,name'])
             ->when($request->search, fn($q) => $q->where(function ($sub) use ($request) {
                 $sub->whereHas('user', fn($u) => $u
                     ->where('name',  'like', "%{$request->search}%")
@@ -145,13 +175,17 @@ class HRController extends Controller
                 'email'               => $e->user?->email,
                 'phone'               => $e->user?->phone,
                 'fan_number'          => $e->fan_number,
-                'package'             => $this->levelToPackage($e->level ?? 'staff'),
+                'package'             => Employee::levelToPackage($e->level ?? 'staff'),
                 'level'               => $e->level,
                 'job_title'           => $e->job_title,
                 'department'          => $e->department,
-                'branch'              => $e->branch,
+                'branch'              => $e->companyBranch?->name ?? $e->branch,
+                'company_branch_id'   => $e->company_branch_id,
+                'can_manage'          => $this->canManage($e),
                 'request_note'        => $e->request_note,
                 'registration_status' => $e->registration_status ?? 'approved',
+                'admin_approval_status' => $e->admin_approval_status,
+                'payment_preference'  => $e->payment_preference,
                 'status'              => $e->activeMembership?->status ?? ($e->is_enrolled ? 'active' : 'inactive'),
                 'enrolled_at'         => $e->enrolled_at?->toDateString() ?? $e->created_at->toDateString(),
                 'is_banned'           => $e->is_banned,
@@ -159,7 +193,10 @@ class HRController extends Controller
                 'ban_reason'          => $e->ban_reason,
             ]);
 
-        $allEmployees = $company->employees()->get();
+        // A branch login only has to act on its own branch's pending employees
+        $allEmployees = $company->employees()
+            ->when($this->myBranchId(), fn($q, $b) => $q->where('company_branch_id', $b))
+            ->get();
         $pendingCount = $allEmployees->where('registration_status', 'pending')->count();
 
         return response()->json([
@@ -175,13 +212,15 @@ class HRController extends Controller
     {
         $company = $this->getMyCompany();
         if ($employee->company_id !== $company->id) abort(403);
+        $this->assertCanManage($employee);
 
         $request->validate([
-            'plan' => 'nullable|string|max:50',
+            'plan'               => 'nullable|string|max:50',
+            'payment_preference' => 'nullable|in:pay_now,pay_later',
         ]);
 
         $tier  = $request->plan ?? 'basic';
-        $level = $this->packageToLevel($tier);
+        $level = Employee::packageToLevel($tier);
 
         $employee->update([
             'registration_status'   => 'approved',
@@ -190,7 +229,16 @@ class HRController extends Controller
             'enrolled_at'           => now(),
             'level'                 => $level,
             'payment_status'        => 'unpaid',
+            'payment_preference'    => $request->payment_preference,
         ]);
+
+        if ($request->payment_preference === 'pay_now') {
+            try {
+                AdminNotification::invoiceRequest($company->name, $employee->user->name, $employee->id, $company->id);
+            } catch (\Throwable $e) {
+                \Illuminate\Support\Facades\Log::error('Admin invoice-request notification failed: ' . $e->getMessage());
+            }
+        }
 
         // User stays INACTIVE — admin must give final approval before they can log in
 
@@ -228,10 +276,88 @@ class HRController extends Controller
         ]);
     }
 
+    /* ── Bulk approve / reject (company HR) ───────────────────────── */
+
+    public function bulkApproveEmployees(Request $request): JsonResponse
+    {
+        $data = $request->validate([
+            'ids'                => 'required|array|min:1|max:200',
+            'ids.*'              => 'integer',
+            'plan'               => 'nullable|string|max:50',
+            'payment_preference' => 'required|in:pay_now,pay_later',
+        ]);
+
+        return $this->runBulk($data['ids'], function (Employee $e) use ($data) {
+            $this->approveEmployee(new Request([
+                'plan'               => $data['plan'] ?? 'basic',
+                'payment_preference' => $data['payment_preference'],
+            ]), $e);
+        }, 'approved');
+    }
+
+    public function bulkRejectEmployees(Request $request): JsonResponse
+    {
+        $data = $request->validate([
+            'ids'    => 'required|array|min:1|max:200',
+            'ids.*'  => 'integer',
+            'reason' => 'nullable|string|max:500',
+        ]);
+
+        return $this->runBulk($data['ids'], function (Employee $e) {
+            $this->rejectEmployee($e);
+        }, 'rejected');
+    }
+
+    /**
+     * Runs $action for each of the company's employees that are still
+     * pending HR review, and reports how many succeeded / were skipped.
+     */
+    private function runBulk(array $ids, \Closure $action, string $verb): JsonResponse
+    {
+        $company = $this->getMyCompany();
+
+        $employees = Employee::with('user', 'company')
+            ->where('company_id', $company->id)
+            ->whereIn('id', $ids)
+            ->get();
+
+        $done = 0;
+        $failed = [];
+        foreach ($employees as $employee) {
+            if (!$this->canManage($employee)) {
+                $failed[] = ['id' => $employee->id, 'name' => $employee->user?->name, 'reason' => 'Belongs to another branch'];
+                continue;
+            }
+            if ($employee->registration_status !== 'pending') {
+                $failed[] = ['id' => $employee->id, 'name' => $employee->user?->name, 'reason' => 'Already processed'];
+                continue;
+            }
+            try {
+                $action($employee);
+                $done++;
+            } catch (\Throwable $e) {
+                \Illuminate\Support\Facades\Log::error("HR bulk {$verb} failed for employee {$employee->id}: " . $e->getMessage());
+                $failed[] = ['id' => $employee->id, 'name' => $employee->user?->name, 'reason' => 'Could not be processed'];
+            }
+        }
+
+        $missing = count($ids) - $employees->count();
+        if ($missing > 0) {
+            $failed[] = ['id' => null, 'name' => null, 'reason' => "{$missing} not found in your company"];
+        }
+
+        return response()->json([
+            'message' => "{$done} employee(s) {$verb}." . ($failed ? ' ' . count($failed) . ' skipped.' : ''),
+            'done'    => $done,
+            'failed'  => $failed,
+        ]);
+    }
+
     public function rejectEmployee(Employee $employee): JsonResponse
     {
         $company = $this->getMyCompany();
         if ($employee->company_id !== $company->id) abort(403);
+        $this->assertCanManage($employee);
 
         $employee->update(['registration_status' => 'rejected']);
         $employee->user?->update(['is_active' => false]);
@@ -270,6 +396,7 @@ class HRController extends Controller
     {
         $company = $this->getMyCompany();
         if ($employee->company_id !== $company->id) abort(403);
+        $this->assertCanManage($employee);
 
         $data = $request->validate([
             'days'       => 'required|integer|min:1|max:365',
@@ -302,6 +429,7 @@ class HRController extends Controller
     {
         $company = $this->getMyCompany();
         if ($employee->company_id !== $company->id) abort(403);
+        $this->assertCanManage($employee);
 
         $employee->update(['banned_until' => null, 'ban_reason' => null]);
         AuditLog::record('updated', $employee, [], ['banned_until' => null]);
@@ -312,20 +440,42 @@ class HRController extends Controller
         ]);
     }
 
+    /** HR resets the authenticator of one of their own employees (lost phone) */
+    public function resetEmployeeTwoFactor(Employee $employee): JsonResponse
+    {
+        $company = $this->getMyCompany();
+        if ($employee->company_id !== $company->id) abort(403);
+        $this->assertCanManage($employee);
+
+        $user = $employee->user;
+        if (!$user) {
+            return response()->json(['message' => 'This employee has no login account.'], 404);
+        }
+
+        $user->resetTwoFactor();
+        AuditLog::record('updated', $user, ['google2fa_enabled' => true], ['google2fa_enabled' => false]);
+
+        return response()->json([
+            'message' => "Two-factor authentication reset for {$user->name}. They will scan a new QR code on their next login.",
+        ]);
+    }
+
     private function employeePayload(Employee $e): array
     {
-        $e->loadMissing(['user:id,name,email,phone', 'activeMembership']);
+        $e->loadMissing(['user:id,name,email,phone', 'activeMembership', 'companyBranch:id,name']);
         return [
             'id'                  => $e->id,
             'name'                => $e->user?->name,
             'email'               => $e->user?->email,
             'phone'               => $e->user?->phone,
             'fan_number'          => $e->fan_number,
-            'package'             => $this->levelToPackage($e->level ?? 'staff'),
+            'package'             => Employee::levelToPackage($e->level ?? 'staff'),
             'level'               => $e->level,
             'job_title'           => $e->job_title,
             'department'          => $e->department,
-            'branch'              => $e->branch,
+            'branch'              => $e->companyBranch?->name ?? $e->branch,
+            'company_branch_id'   => $e->company_branch_id,
+            'can_manage'          => $this->canManage($e),
             'request_note'        => $e->request_note,
             'registration_status' => $e->registration_status ?? 'approved',
             'status'              => $e->activeMembership?->status ?? ($e->is_enrolled ? 'active' : 'inactive'),
@@ -348,28 +498,34 @@ class HRController extends Controller
             'last_name'     => 'required|string|max:100',
             'fan_number'    => 'required|string|min:5|max:20|unique:employees,fan_number|unique:users,fan_number',
             'email'         => 'required|email|max:255|unique:users,email',
-            'temp_password' => 'required|string|min:6|max:100',
-            'package'       => 'required|in:basic,basic_plus,platinum',
+            'temp_password' => ['required', 'string', 'max:100', new \App\Rules\StrongPassword()],
+            'package'       => ['required', 'string', Rule::exists('membership_plans', 'tier')->where(fn ($q) => $q->where('is_active', true))],
             'job_title'     => 'nullable|string|max:255',
             'department'    => 'nullable|string|max:255',
             'phone'         => 'nullable|string|max:20',
             'joined_at'     => 'nullable|date',
+            'company_branch_id' => ['nullable', 'integer', Rule::exists('company_branches', 'id')
+                ->where(fn ($q) => $q->where('company_id', $company->id)->whereNull('deleted_at'))],
             'photo'         => 'nullable|image|mimes:jpg,jpeg,png|max:5120',
         ], [
             'fan_number.unique' => 'This FAN number is already registered.',
             'email.unique'      => 'This email address is already registered.',
-            'temp_password.min' => 'Password must be at least 6 characters.',
+            'package.exists'    => 'The selected package is no longer available.',
         ]);
 
-        $level    = $this->packageToLevel($request->package);
+        $level    = Employee::packageToLevel($request->package);
         $fullName = trim("{$request->first_name} {$request->middle_name} {$request->last_name}");
+
+        // A branch login always registers into its own branch; head office may pick one
+        $branchId = $this->myBranchId() ?? ($request->company_branch_id ?: null);
+        $branch   = $branchId ? \App\Models\CompanyBranch::find($branchId) : null;
 
         $photoPath = null;
         if ($request->hasFile('photo')) {
             $photoPath = $request->file('photo')->store('employee-photos', 'public');
         }
 
-        return DB::transaction(function () use ($request, $company, $level, $fullName, $photoPath): JsonResponse {
+        return DB::transaction(function () use ($request, $company, $level, $fullName, $photoPath, $branch): JsonResponse {
             $user = User::create([
                 'name'                 => $fullName,
                 'email'                => $request->email,
@@ -378,12 +534,14 @@ class HRController extends Controller
                 'phone'                => $request->phone,
                 'fan_number'           => $request->fan_number,
                 'is_active'            => false,   // activated only after admin approves
-                'must_change_password' => true,
+                'must_reset_password'  => true,
             ]);
 
             $employee = Employee::create([
                 'user_id'               => $user->id,
                 'company_id'            => $company->id,
+                'company_branch_id'     => $branch?->id,
+                'branch'                => $branch?->name,
                 'fan_number'            => $request->fan_number,
                 'job_title'             => $request->job_title,
                 'level'                 => $level,
@@ -409,5 +567,27 @@ class HRController extends Controller
                 ],
             ], 201);
         });
+    }
+
+    /* ── Bulk import employees (CSV) ─────────────────────────────── */
+
+    public function importEmployees(Request $request, EmployeeImportService $importer): JsonResponse
+    {
+        $company = $this->getMyCompany();
+
+        $request->validate([
+            'file' => 'required|file|mimes:csv,txt|max:5120',
+        ]);
+
+        // A branch login imports into its own branch
+        $branch = $this->myBranchId() ? \App\Models\CompanyBranch::find($this->myBranchId()) : null;
+
+        $result = $importer->import($request->file('file'), $company, $branch);
+
+        return response()->json([
+            'message' => count($result['created']) . ' employee(s) imported, ' . count($result['failed']) . ' row(s) failed.',
+            'created' => $result['created'],
+            'failed'  => $result['failed'],
+        ]);
     }
 }

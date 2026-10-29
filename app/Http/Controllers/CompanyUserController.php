@@ -4,7 +4,6 @@ namespace App\Http\Controllers;
 
 use App\Models\Company;
 use App\Models\Permission;
-use App\Models\Role;
 use App\Models\RolePermission;
 use App\Models\User;
 use App\Models\UserPermission;
@@ -26,6 +25,9 @@ class CompanyUserController extends Controller
 
     private function requiresManage(): void
     {
+        if (auth()->user()->isCompanyBranchLogin()) {
+            abort(403, 'Team and role management is handled by the head office.');
+        }
         if (!auth()->user()->hasPermission('co.team.view')) {
             abort(403, 'You do not have permission to manage team members.');
         }
@@ -38,16 +40,12 @@ class CompanyUserController extends Controller
         $this->requiresManage();
         $company = $this->getMyCompany();
 
-        $subRoles = Role::where('scope', 'company')
-            ->where(fn($q) => $q->whereNull('company_id')->orWhere('company_id', $company->id))
-            ->where('name', '!=', 'company_hr')
-            ->pluck('name')->toArray();
-
-        $users = User::whereIn('role', array_merge(User::COMPANY_SUB_ROLES, $subRoles))
+        $users = User::whereIn('role', User::COMPANY_SUB_ROLES)
             ->where('company_id', $company->id)
             ->orderByDesc('created_at')
             ->get()
-            ->map(fn($u) => $this->formatUser($u));
+            ->map(fn($u) => $this->formatUser($u))
+            ->values();
 
         return response()->json($users);
     }
@@ -59,11 +57,7 @@ class CompanyUserController extends Controller
         $this->requiresManage();
         $company = $this->getMyCompany();
 
-        $company    = $this->getMyCompany();
-        $validRoles = Role::where('scope', 'company')
-            ->where(fn($q) => $q->whereNull('company_id')->orWhere('company_id', $company->id))
-            ->where('name', '!=', 'company_hr')   // HR is the primary role, not assignable as sub
-            ->pluck('name')->toArray();
+        $validRoles = User::COMPANY_SUB_ROLES;
 
         $request->validate([
             'name'  => 'required|string|max:100',
@@ -71,7 +65,7 @@ class CompanyUserController extends Controller
             'role'  => ['required', 'string', 'in:' . implode(',', $validRoles)],
         ]);
 
-        $tempPassword = Str::random(6) . rand(10, 99) . '!';
+        $tempPassword = Str::password(14);
 
         $user = User::create([
             'name'                => $request->name,
@@ -113,7 +107,7 @@ class CompanyUserController extends Controller
         $this->requiresManage();
         $this->assertOwnership($user);
 
-        $tempPassword = Str::random(6) . rand(10, 99) . '!';
+        $tempPassword = Str::password(14);
         $user->update(['password' => Hash::make($tempPassword), 'must_reset_password' => true]);
 
         return response()->json(['message' => 'Password reset.', 'temp_password' => $tempPassword]);

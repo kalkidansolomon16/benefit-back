@@ -9,7 +9,10 @@ class PartnerApplication extends Model
 {
     protected $fillable = [
         'user_id',
+        'parent_gym_id',
+        'branch_user_id',
         'facility_name',
+        'branch_name',
         'categories',
         'contact_person',
         'contact_phone',
@@ -28,6 +31,7 @@ class PartnerApplication extends Model
         'operating_hours_summary',
         'max_capacity',
         'amenities',
+        'branches',
         'status',
         'rejection_reason',
     ];
@@ -35,7 +39,19 @@ class PartnerApplication extends Model
     protected $casts = [
         'categories' => 'array',
         'amenities'  => 'array',
+        'branches'   => 'array',
     ];
+
+    /** Login created for a branch an existing owner asked to add */
+    public function branchUser(): BelongsTo
+    {
+        return $this->belongsTo(User::class, 'branch_user_id');
+    }
+
+    public function parentGym(): BelongsTo
+    {
+        return $this->belongsTo(Gym::class, 'parent_gym_id');
+    }
 
     public function user(): BelongsTo
     {

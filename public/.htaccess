@@ -1,3 +1,17 @@
+<IfModule mod_headers.c>
+    Header always set X-Frame-Options "DENY"
+    Header always set X-Content-Type-Options "nosniff"
+    Header always set Referrer-Policy "strict-origin-when-cross-origin"
+    Header always set Permissions-Policy "camera=(), microphone=(), geolocation=(), payment=()"
+    Header always set Cross-Origin-Opener-Policy "same-origin"
+    Header always set Cross-Origin-Resource-Policy "same-site"
+    Header always set Content-Security-Policy "default-src 'self'; script-src 'self' https://www.google.com https://www.gstatic.com; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self' data:; connect-src 'self' https://www.google.com; frame-src https://www.google.com; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'"
+
+    # HSTS only makes sense over HTTPS — harmless to send but only takes
+    # effect in browsers once the site is actually reached over TLS.
+    Header always set Strict-Transport-Security "max-age=31536000; includeSubDomains" env=HTTPS
+</IfModule>
+
 <IfModule mod_rewrite.c>
     <IfModule mod_negotiation.c>
         Options -MultiViews -Indexes
@@ -5,21 +19,24 @@
 
     RewriteEngine On
 
-    # Handle Authorization Header
+    # Handle Authorization header (needed for Sanctum on shared hosting)
     RewriteCond %{HTTP:Authorization} .
     RewriteRule .* - [E=HTTP_AUTHORIZATION:%{HTTP:Authorization}]
 
-    # Handle X-XSRF-Token Header
-    RewriteCond %{HTTP:x-xsrf-token} .
-    RewriteRule .* - [E=HTTP_X_XSRF_TOKEN:%{HTTP:X-XSRF-Token}]
-
-    # Redirect Trailing Slashes If Not A Folder...
+    # Redirect trailing slashes
     RewriteCond %{REQUEST_FILENAME} !-d
     RewriteCond %{REQUEST_URI} (.+)/$
     RewriteRule ^ %1 [L,R=301]
 
-    # Send Requests To Front Controller...
-    RewriteCond %{REQUEST_FILENAME} !-d
-    RewriteCond %{REQUEST_FILENAME} !-f
-    RewriteRule ^ index.php [L]
+    # Serve real files and directories directly (assets/, favicon, storage/, etc.)
+    RewriteCond %{REQUEST_FILENAME} -f [OR]
+    RewriteCond %{REQUEST_FILENAME} -d
+    RewriteRule ^ - [L]
+
+    # API and Sanctum routes -> Laravel's index.php
+    RewriteRule ^api/ index.php [L]
+    RewriteRule ^sanctum/ index.php [L]
+
+    # All other routes -> Vue SPA (index.html)
+    RewriteRule ^ index.html [L]
 </IfModule>

@@ -6,6 +6,7 @@ use App\Models\Employee;
 use App\Models\Gym;
 use App\Models\MembershipPlan;
 use Illuminate\Http\JsonResponse;
+use Illuminate\Http\Request;
 use Illuminate\Support\Carbon;
 
 class EmployeePortalController extends Controller
@@ -33,42 +34,42 @@ class EmployeePortalController extends Controller
         // ── Resolve plan dynamically from membership_plans table ────
         $levelToTier = ['chief' => 'platinum', 'director' => 'basic_plus', 'manager' => 'basic', 'staff' => 'basic'];
         $employeeLevel = $employee->level ?? 'staff';
-        $fallbackTier  = $levelToTier[$employeeLevel] ?? 'basic';
+        $canonicalTier = $levelToTier[$employeeLevel] ?? 'basic';
 
-        // Try to find the plan by tier key, then by target_level, else cheapest active plan
-        $myPlan = MembershipPlan::where('tier', $fallbackTier)->where('is_active', true)->first()
-               ?? MembershipPlan::where('target_level', $employeeLevel)->where('is_active', true)->first()
-               ?? MembershipPlan::where('is_active', true)->orderBy('monthly_fee_etb')->first();
-
-        $planKey  = $myPlan?->tier  ?? $fallbackTier;
-        $planName = $myPlan?->name  ?? ucfirst(str_replace('_', ' ', $planKey));
-        $planFee  = (float) ($myPlan?->monthly_fee_etb ?? 0);
-
-        // Accessible tiers: all active plans whose fee ≤ employee's plan fee
         $allActivePlans = MembershipPlan::where('is_active', true)->orderBy('monthly_fee_etb')->get();
 
-        $accessibleTiers = $allActivePlans
-            ->filter(fn($p) => (float)$p->monthly_fee_etb <= $planFee)
-            ->pluck('tier')
-            ->push($planKey)          // always include own tier
-            ->unique()
-            ->values()
-            ->toArray();
+        // Plan tiers are typed by admins ("Fit Basic", "fit_basic_plus"), so compare them in a
+        // normalised form: lower-case, every run of non-alphanumerics turned into "_".
+        $norm = fn(string $t): string => trim(preg_replace('/[^a-z0-9]+/', '_', strtolower($t)), '_');
 
-        // Fallback if no plans exist in DB yet
-        if (empty($accessibleTiers)) {
-            $accessibleTiers = match($planKey) {
-                'platinum'   => ['basic', 'basic_plus', 'premium', 'platinum'],
-                'basic_plus' => ['basic', 'basic_plus'],
-                default      => [$planKey],
-            };
-        }
+        // Flexible plan finder: exact match → suffix match (e.g. 'fit_basic' ends with '_basic') → cheapest
+        $myPlan = $allActivePlans->first(fn($p) => $norm($p->tier) === $canonicalTier)
+            ?? $allActivePlans->first(fn($p) => str_ends_with($norm($p->tier), '_' . $canonicalTier))
+            ?? $allActivePlans->first();
 
-        // Accessible plan names (only the standard tiers that match)
-        $tierRank = ['basic' => 0, 'basic_plus' => 1, 'premium' => 2, 'platinum' => 3];
+        $planKey  = $myPlan?->tier  ?? $canonicalTier;
+        $planName = $myPlan?->name  ?? ucfirst(str_replace('_', ' ', $canonicalTier));
+        $planFee  = (float) ($myPlan?->monthly_fee_etb ?? 0);
+
+        // Normalize a plan tier key to a canonical gym tier (strips brand prefix).
+        // e.g. 'fit_basic' → 'basic', 'fit_basic_plus' → 'basic_plus', 'fit_premium' → 'premium'
+        $gymTierOf = function (string $tier) use ($norm): string {
+            $tier = $norm($tier);
+            foreach (['platinum', 'premium', 'basic_plus', 'basic'] as $c) {
+                if ($tier === $c || str_ends_with($tier, '_' . $c)) return $c;
+            }
+            return $tier;
+        };
+
+        $myGymTier = $gymTierOf($planKey);
+
+        // Only show gyms that match the employee's own plan tier exactly
+        $accessibleTiers = [$myGymTier];
+
+        // Plan label for the employee's own tier
         $accessiblePlanLabels = $allActivePlans
-            ->filter(fn($p) => in_array($p->tier, $accessibleTiers) && isset($tierRank[$p->tier]))
-            ->mapWithKeys(fn($p) => [$p->tier => $p->name])
+            ->filter(fn($p) => $gymTierOf($p->tier) === $myGymTier)
+            ->mapWithKeys(fn($p) => [$gymTierOf($p->tier) => $p->name])
             ->toArray();
 
         // ── Check-in stats ──────────────────────────────────────────
@@ -93,11 +94,15 @@ class EmployeePortalController extends Controller
             ])->values();
 
         // ── Accessible gyms based on plan ───────────────────────────
-        $gyms = Gym::where('is_active', true)
+        $foundGyms = Gym::where('is_active', true)
             ->whereIn('tier', $accessibleTiers)
             ->orderBy('name')
-            ->get(['id', 'name', 'tier', 'sub_city', 'city', 'address', 'facilities', 'opening_hours'])
+            ->get(['id', 'name', 'tier', 'sub_city', 'city', 'address', 'facilities', 'opening_hours', 'max_capacity']);
+        $crowd = Gym::crowdFor($foundGyms);
+
+        $gyms = $foundGyms
             ->map(fn($g) => [
+                'crowd'        => $crowd[$g->id] ?? null,
                 'id'           => $g->id,
                 'name'         => $g->name,
                 'tier'         => $g->tier,
@@ -140,5 +145,46 @@ class EmployeePortalController extends Controller
             'recent_checkins' => $recentCheckins,
             'accessible_gyms' => $gyms,
         ]);
+    }
+
+    /** Whether the employee's name may appear in the "who is in the gym" list */
+    public function gymPrivacy(): JsonResponse
+    {
+        return response()->json(['show_in_gym_list' => (bool) $this->getMyEmployee()->show_in_gym_list]);
+    }
+
+    public function updateGymPrivacy(Request $request): JsonResponse
+    {
+        $data = $request->validate(['show_in_gym_list' => 'required|boolean']);
+
+        $employee = $this->getMyEmployee();
+        $employee->update(['show_in_gym_list' => $data['show_in_gym_list']]);
+
+        return response()->json([
+            'show_in_gym_list' => (bool) $employee->show_in_gym_list,
+            'message' => $employee->show_in_gym_list
+                ? 'Your name can appear in the gym list.'
+                : 'Your name is hidden from the gym list. You are still counted in the totals.',
+        ]);
+    }
+
+    public function updateProfile(Request $request): JsonResponse
+    {
+        $employee = $this->getMyEmployee();
+
+        $request->validate([
+            'phone'      => 'nullable|string|max:20',
+            'job_title'  => 'nullable|string|max:100',
+            'department' => 'nullable|string|max:100',
+            'branch'     => 'nullable|string|max:100',
+        ]);
+
+        if ($request->has('phone')) {
+            $employee->user?->update(['phone' => $request->phone]);
+        }
+
+        $employee->update($request->only(['job_title', 'department', 'branch']));
+
+        return response()->json(['message' => 'Profile updated successfully.']);
     }
 }

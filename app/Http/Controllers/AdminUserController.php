@@ -2,6 +2,9 @@
 
 namespace App\Http\Controllers;
 
+use App\Models\AuditLog;
+use App\Models\Company;
+use App\Models\Gym;
 use App\Models\Permission;
 use App\Models\Role;
 use App\Models\RolePermission;
@@ -53,7 +56,7 @@ class AdminUserController extends Controller
         ]);
 
         // Generate a readable temporary password
-        $tempPassword = Str::random(6) . rand(10, 99) . '!';
+        $tempPassword = Str::password(14);
 
         $user = User::create([
             'name'                => $request->name,
@@ -94,7 +97,7 @@ class AdminUserController extends Controller
         $this->requiresManage();
         $this->assertSubRole($user);
 
-        $tempPassword = Str::random(6) . rand(10, 99) . '!';
+        $tempPassword = Str::password(14);
 
         $user->update([
             'password'            => Hash::make($tempPassword),
@@ -237,6 +240,118 @@ class AdminUserController extends Controller
     }
 
     /* ── Helpers ─────────────────────────────────────────────── */
+
+    /* ── Reset two-factor authentication ─────────────────────── */
+
+    /** Admin sub-user (finance / support) lost their authenticator */
+    public function resetTwoFactor(User $user): JsonResponse
+    {
+        $this->requiresAdminTeamManager();
+        $this->assertSubRole($user);
+
+        return $this->clearTwoFactor($user);
+    }
+
+    /** Company HR account lost their authenticator */
+    public function resetCompanyTwoFactor(Company $company): JsonResponse
+    {
+        $this->requiresAdminTeamManager();
+
+        $user = User::where('email', $company->contact_email)->where('role', 'company_hr')->first();
+        if (!$user) {
+            return response()->json(['message' => 'No HR login account found for this company.'], 404);
+        }
+
+        return $this->clearTwoFactor($user);
+    }
+
+    /** Gym partner (owner) account lost their authenticator */
+    public function resetGymTwoFactor(Gym $gym): JsonResponse
+    {
+        $this->requiresAdminTeamManager();
+
+        $user = User::where('email', $gym->contact_email)->where('role', 'gym_partner')->first();
+        if (!$user) {
+            return response()->json(['message' => 'No partner login account found for this gym.'], 404);
+        }
+
+        return $this->clearTwoFactor($user);
+    }
+
+    /** An employee lost their phone / authenticator */
+    public function resetEmployeeTwoFactor(\App\Models\Employee $employee): JsonResponse
+    {
+        $this->requiresAdminTeamManager();
+
+        $user = $employee->user;
+        if (!$user) {
+            return response()->json(['message' => 'No user account linked to this employee.'], 404);
+        }
+
+        return $this->clearTwoFactor($user);
+    }
+
+    /** List a company's branches with their logins (admin view) */
+    public function companyBranches(Company $company): JsonResponse
+    {
+        $this->requiresAdminTeamManager();
+
+        $branches = $company->branches()->with('loginUser:id,email,is_active,company_branch_id')->orderBy('name')->get()
+            ->map(fn($b) => [
+                'id'             => $b->id,
+                'name'           => $b->name,
+                'contact_person' => $b->contact_person,
+                'city'           => $b->city,
+                'address'        => $b->address,
+                'is_active'      => $b->is_active,
+                'login_email'    => $b->loginUser?->email,
+                'employee_count' => $b->employees()->count(),
+            ]);
+
+        return response()->json(['data' => $branches]);
+    }
+
+    /** A company branch login lost their authenticator */
+    public function resetCompanyBranchTwoFactor(Company $company, \App\Models\CompanyBranch $branch): JsonResponse
+    {
+        $this->requiresAdminTeamManager();
+        if ($branch->company_id !== $company->id) abort(404);
+
+        $user = $branch->loginUser;
+        if (!$user) {
+            return response()->json(['message' => 'This branch has no login account.'], 404);
+        }
+
+        return $this->clearTwoFactor($user);
+    }
+
+    /** Only FitAccess admin staff with team management rights may reset 2FA */
+    private function requiresAdminTeamManager(): void
+    {
+        $actor = auth()->user();
+        if (!in_array($actor->role, User::ADMIN_ROLES, true) || !$actor->hasPermission('team.view')) {
+            abort(403, 'You do not have permission to reset two-factor authentication.');
+        }
+    }
+
+    /** Wipe the saved secret so a fresh QR code is shown on the next login */
+    private function clearTwoFactor(User $user): JsonResponse
+    {
+        $user->forceFill([
+            'google2fa_secret'         => null,
+            'google2fa_enabled'        => false,
+            'google2fa_recovery_codes' => null,
+        ])->save();
+
+        // Sign the user out everywhere so the reset takes effect immediately
+        $user->tokens()->delete();
+
+        AuditLog::record('updated', $user, ['google2fa_enabled' => true], ['google2fa_enabled' => false]);
+
+        return response()->json([
+            'message' => "Two-factor authentication reset for {$user->name}. They will scan a new QR code on their next login.",
+        ]);
+    }
 
     private function assertSubRole(User $user): void
     {

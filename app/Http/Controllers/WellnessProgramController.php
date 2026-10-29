@@ -48,7 +48,21 @@ class WellnessProgramController extends Controller
 
     public function update(Request $request, WellnessProgram $wellnessProgram): JsonResponse
     {
-        $wellnessProgram->update($request->all());
+        $validated = $request->validate([
+            'title'            => 'sometimes|required|string|max:255',
+            'description'      => 'sometimes|nullable|string',
+            'category'         => 'sometimes|required|in:fitness,mental_health,nutrition,medical,yoga,lifestyle,other',
+            'provider'         => 'sometimes|nullable|string|max:255',
+            'provider_contact' => 'sometimes|nullable|string|max:255',
+            'location'         => 'sometimes|nullable|string',
+            'is_online'        => 'sometimes|boolean',
+            'start_date'       => 'sometimes|nullable|date',
+            'end_date'         => 'sometimes|nullable|date|after:start_date',
+            'max_participants' => 'sometimes|nullable|integer|min:1',
+            'is_active'        => 'sometimes|boolean',
+        ]);
+
+        $wellnessProgram->update($validated);
         return response()->json($wellnessProgram);
     }
 

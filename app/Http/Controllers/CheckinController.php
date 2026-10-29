@@ -82,9 +82,12 @@ class CheckinController extends Controller
         $tier    = self::employeeTier($employee);
         $allowed = self::allowedTiers($tier);
 
-        $gyms = Gym::whereIn('tier', $allowed)
+        $found = Gym::whereIn('tier', $allowed)
             ->where('is_active', true)
-            ->get()
+            ->get();
+        $crowd = Gym::crowdFor($found);
+
+        $gyms = $found
             ->map(fn($g) => [
                 'id'       => $g->id,
                 'name'     => $g->name,
@@ -92,10 +95,71 @@ class CheckinController extends Controller
                 'city'     => $g->city      ?? null,
                 'sub_city' => $g->sub_city  ?? null,
                 'tier'     => $g->tier      ?? 'basic',
+                'crowd'    => $crowd[$g->id] ?? null,
             ])
             ->values();
 
         return response()->json(['gyms' => $gyms]);
+    }
+
+    // ── Employee: who is in a gym right now ──────────────────────
+
+    /**
+     * People currently working out at a gym the employee may use, shown as
+     * "First name + initial" only. Employees who switched off "Show me in the
+     * gym list" are not named (they are still counted in `hidden_count`).
+     */
+    public function occupants(Gym $gym): JsonResponse
+    {
+        $me = Employee::where('user_id', auth()->id())->firstOrFail();
+
+        $allowed = self::allowedTiers(self::employeeTier($me));
+        if (!$gym->is_active || !in_array($gym->tier, $allowed, true)) {
+            return response()->json(['message' => 'This gym is not available under your current plan.'], 403);
+        }
+
+        $rows = Checkin::where('gym_id', $gym->id)
+            ->whereDate('checked_in_at', now()->toDateString())
+            ->whereNull('checked_out_at')
+            ->where('checked_in_at', '>=', now()->subHours(3))
+            ->with('employee.user:id,name')
+            ->latest('checked_in_at')
+            ->get();
+
+        $people = [];
+        $hidden = 0;
+        foreach ($rows as $c) {
+            $isMe = $c->employee_id === $me->id;
+            if (!$isMe && $c->employee && $c->employee->show_in_gym_list === false) {
+                $hidden++;
+                continue;
+            }
+            $people[] = [
+                'name'        => $isMe ? 'You' : self::shortName($c->employee?->user?->name),
+                'is_me'       => $isMe,
+                'since'       => $c->checked_in_at?->format('H:i'),
+                'minutes_ago' => (int) $c->checked_in_at?->diffInMinutes(now()),
+            ];
+        }
+
+        return response()->json([
+            'gym'          => ['id' => $gym->id, 'name' => $gym->name],
+            'total'        => $rows->count(),
+            'people'       => $people,
+            'hidden_count' => $hidden,
+        ]);
+    }
+
+    /** "kebede alemu taddese" → "Kebede A." */
+    private static function shortName(?string $full): string
+    {
+        $parts = preg_split('/\s+/', trim((string) $full), -1, PREG_SPLIT_NO_EMPTY);
+        if (!$parts) return 'Member';
+
+        $first = mb_convert_case($parts[0], MB_CASE_TITLE, 'UTF-8');
+        if (count($parts) < 2) return $first;
+
+        return $first . ' ' . mb_strtoupper(mb_substr($parts[1], 0, 1, 'UTF-8'), 'UTF-8') . '.';
     }
 
     // ── Employee: select a gym for today ─────────────────────────
@@ -167,10 +231,13 @@ class CheckinController extends Controller
 
         $selection = DailyGymSelection::todayFor($employee->id);
 
-        // All gyms available under this employee's plan
-        $gyms = Gym::whereIn('tier', $allowed)
+        // All gyms available under this employee's plan, with how busy each one is right now
+        $found = Gym::whereIn('tier', $allowed)
             ->where('is_active', true)
-            ->get()
+            ->get();
+        $crowd = Gym::crowdFor($found);
+
+        $gyms = $found
             ->map(fn($g) => [
                 'id'       => $g->id,
                 'name'     => $g->name,
@@ -178,6 +245,7 @@ class CheckinController extends Controller
                 'city'     => $g->city      ?? null,
                 'sub_city' => $g->sub_city  ?? null,
                 'tier'     => $g->tier      ?? 'basic',
+                'crowd'    => $crowd[$g->id] ?? null,
             ])
             ->values();
 
@@ -222,26 +290,26 @@ class CheckinController extends Controller
 
     public function expectedVisitors(Request $request): JsonResponse
     {
-        $gymId = $request->gym_id;
-
-        if (!$gymId) {
-            $user  = auth()->user();
-            $gym   = $user->gym_id
-                ? Gym::find($user->gym_id)
-                : Gym::where('contact_email', $user->email)->first();
-            $gymId = $gym?->id;
-        }
+        // The branch being viewed, or every branch the account may view (?scope=all)
+        $user  = auth()->user();
+        $gymId = Gym::forPartner($user, $request->gym_id)?->id;
 
         if (!$gymId) {
             return response()->json(['visitors' => []]);
         }
 
-        $selections = DailyGymSelection::where('gym_id', $gymId)
+        $gymIds = [$gymId];
+        if ($request->query('scope') === 'all') {
+            $viewable = Gym::viewableBy($user)->pluck('id')->all();
+            if (count($viewable) > 1) $gymIds = $viewable;
+        }
+
+        $selections = DailyGymSelection::whereIn('gym_id', $gymIds)
             ->where('selection_date', now()->toDateString())
-            ->with(['employee.user'])
+            ->with(['employee.user', 'gym:id,name,branch_name'])
             ->get();
 
-        $checkedInIds = Checkin::where('gym_id', $gymId)
+        $checkedInIds = Checkin::whereIn('gym_id', $gymIds)
             ->whereDate('checked_in_at', now()->toDateString())
             ->pluck('employee_id')
             ->toArray();
@@ -250,6 +318,7 @@ class CheckinController extends Controller
             'employee_id' => $s->employee_id,
             'name'        => $s->employee?->user?->name ?? 'Unknown',
             'fan_number'  => $s->employee?->fan_number,
+            'branch'      => $s->gym?->branch_name ?: $s->gym?->name,
             'checked_in'  => in_array($s->employee_id, $checkedInIds),
             'selected_at' => $s->created_at->format('H:i'),
         ])->values();
@@ -266,6 +335,15 @@ class CheckinController extends Controller
             'gym_id'      => 'required|exists:gyms,id',
             'recorded_by' => 'nullable|string|max:255',
         ]);
+
+        // Gym-side accounts can only scan for the branch they are working at
+        $scanner = auth()->user();
+        if ($scanner && in_array($scanner->role, ['gym_partner', 'gym_hr', 'gym_executive', 'gym_finance'], true)) {
+            $ownGym = Gym::forPartner($scanner, $data['gym_id']);
+            if (!$ownGym || $ownGym->id !== (int) $data['gym_id'] || !Gym::canWrite($scanner, $ownGym)) {
+                return response()->json(['message' => 'You can only scan check-ins for your own branch.'], 403);
+            }
+        }
 
         $slotSeconds = 12 * 3600;
         $currentSlot = intdiv(time(), $slotSeconds);
@@ -370,20 +448,15 @@ class CheckinController extends Controller
 
     private static function allowedTiers(string $tier): array
     {
-        return match($tier) {
-            'platinum'   => ['basic', 'basic_plus', 'platinum'],
-            'basic_plus' => ['basic', 'basic_plus'],
-            default      => ['basic'],
-        };
+        return [$tier];
     }
 
     // ── Find or auto-create membership ────────────────────────────
 
     private function findOrCreateMembership(Employee $employee, Gym $gym, string $tier): Membership
     {
-        $plan = MembershipPlan::where('tier', $tier)
-            ->where('is_active', true)
-            ->first();
+        // Flexible match: exact tier → suffix match (e.g. 'fit_basic_plus' ends with '_basic_plus')
+        $plan = \App\Services\MembershipService::resolvePlan($tier);
 
         /** @var Membership $membership */
         $membership = Membership::firstOrCreate(

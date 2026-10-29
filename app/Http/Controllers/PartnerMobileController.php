@@ -32,9 +32,7 @@ class PartnerMobileController extends Controller
 
         if (!$gymStaff) {
             // Fallback: gym linked by contact email (existing partner portal logic)
-            return Gym::where('contact_email', $request->user()->email)
-                ->where('is_active', true)
-                ->first();
+            return Gym::forPartner($request->user(), null, Gym::where('is_active', true));
         }
 
         return Gym::find($gymStaff->gym_id);
@@ -603,7 +601,7 @@ class PartnerMobileController extends Controller
 
         } else {
             // New user — create account with temp password and send invite email
-            $tempPassword = Str::random(10);
+            $tempPassword = Str::password(14);
 
             $newUser = User::create([
                 'name'      => $name,

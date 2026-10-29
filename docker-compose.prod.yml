@@ -34,6 +34,14 @@ services:
       APP_KEY: base64:y/VTa4B9l+CgpYslb49Yyhy5tV0WggqVbseHm9md0k0=
       APP_DEBUG: "false"
       APP_URL: http://localhost:8000
+      FRONTEND_URL: https://fitaccess.kalkidan.net
+      # TODO: replace with the new (teammate's) Chapa account's keys before redeploying
+      CHAPA_SECRET_KEY: CHASECK_TEST-jvwPMSrN0ZemyGL7oiK2eLMjkiWX7FGY
+      CHAPA_PUBLIC_KEY: CHAPUBK_TEST-bWAGrNcNLJ6JRlerHs6ZllPHhYR1V1zw
+      CHAPA_RETURN_URL: https://fitaccess.kalkidan.net/hr/billing/chapa-return
+      CHAPA_WEBHOOK_URL: https://fitaccess-api.kalkidan.net/api/v1/chapa/webhook
+      # TODO: set to the "secret hash" from that account's dashboard → Settings → Webhooks
+      CHAPA_WEBHOOK_SECRET: ""
       DB_CONNECTION: mysql
       DB_HOST: mysql
       DB_PORT: 3306

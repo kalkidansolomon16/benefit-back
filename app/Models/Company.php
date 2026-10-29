@@ -26,6 +26,25 @@ class Company extends Model
         'contract_end'   => 'date',
     ];
 
+    public function branches(): HasMany
+    {
+        return $this->hasMany(CompanyBranch::class);
+    }
+
+    /**
+     * Turn the head-office HR login and every active branch login on or off
+     * together with the company (used by approve / deactivate).
+     */
+    public function setAccountsActive(bool $active): void
+    {
+        $this->hrUser?->update(['is_active' => $active]);
+
+        $branchIds = $this->branches()->when($active, fn($q) => $q->where('is_active', true))->pluck('id');
+        if ($branchIds->isNotEmpty()) {
+            User::whereIn('company_branch_id', $branchIds)->update(['is_active' => $active]);
+        }
+    }
+
     /**
      * The HR user whose email matches this company's contact_email.
      * Used to sync is_active when the admin activates / deactivates a company.
