@@ -23,6 +23,13 @@ class TelegramController extends Controller
      */
     public function webhook(Request $request): JsonResponse
     {
+        // When a secret is configured, accept only updates that really come from Telegram
+        $secret = (string) config('services.telegram.webhook_secret');
+        if ($secret !== '' && !hash_equals($secret, (string) $request->header('X-Telegram-Bot-Api-Secret-Token'))) {
+            Log::warning('Telegram webhook: request without the right secret token was ignored', ['ip' => $request->ip()]);
+            return response()->json(['ok' => false], 403);
+        }
+
         $update = $request->all();
 
         try {
@@ -456,21 +463,10 @@ class TelegramController extends Controller
                         $this->telegram->answerCallbackQuery($callbackId, 'Already processed.', true);
                         return;
                     }
-                    $app->update(['status' => 'rejected']);
-                    $app->user?->update(['is_active' => false]);
-                    $this->telegram->notifyUserRejected($app->user, 'partner');
-                    if ($app->user?->email) {
-                        Mail::to($app->user->email)->send(
-                            new \App\Mail\FitAccessNotificationMail(
-                                recipientName: $app->user->name,
-                                emailSubject:  'Your FitAccess Gym Partner Application Was Not Approved',
-                                heading:       'Application Not Approved',
-                                message:       "Your gym partner application for {$app->facility_name} was not approved.\n\nPlease contact FitAccess support for assistance.",
-                                buttonText:    'Contact Support',
-                                color:         '#ef4444',
-                            )
-                        );
-                    }
+                    // Same rejection as the portal: works whether or not a login exists yet
+                    // and informs the applicant by email.
+                    app(\App\Http\Controllers\PartnerApplicationController::class)
+                        ->reject(new \Illuminate\Http\Request(), $app);
                     $this->telegram->answerCallbackQuery($callbackId, '❌ Gym rejected.');
                     $this->telegram->editMessageText($chatId, $messageId,
                         "❌ <b>Gym rejected</b> by {$actor->name}.\n<b>{$app->facility_name}</b>"

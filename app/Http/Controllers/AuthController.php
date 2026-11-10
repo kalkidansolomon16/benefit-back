@@ -2,10 +2,8 @@
 
 namespace App\Http\Controllers;
 
-use App\Http\Resources\CompanyResource;
 use App\Http\Resources\UserResource;
 use App\Mail\PasswordResetCodeMail;
-use App\Models\Company;
 use App\Models\Employee;
 use App\Models\PartnerApplication;
 use App\Models\User;
@@ -20,7 +18,6 @@ use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Hash;
 use Illuminate\Support\Facades\Mail;
-use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Str;
 use Illuminate\Validation\ValidationException;
 use Laravel\Sanctum\PersonalAccessToken;
@@ -357,8 +354,11 @@ class AuthController extends Controller
     }
 
     /**
-     * Public: self-service company registration from the sign-up page.
-     * Accepts multipart/form-data so the business licence file can be uploaded.
+     * Public: company (employer) application from the sign-up page.
+     *
+     * Nothing is created except one application row: the admin verifies it and
+     * only then creates the company, the HR login and branch logins, each with a
+     * temporary password that is emailed to them.
      */
     public function registerCompany(Request $request): JsonResponse
     {
@@ -366,100 +366,82 @@ class AuthController extends Controller
             'company_name'     => 'required|string|max:255',
             'industry'         => 'required|string|max:100',
             'company_size'     => 'nullable|string|max:50',
-            'tin'              => 'nullable|string|max:50',
+            'tin'              => 'required|string|max:50',
             'contact_name'     => 'required|string|max:255',
             'job_title'        => 'nullable|string|max:255',
-            'email'            => 'required|email|unique:users,email|unique:companies,contact_email',
+            'email'            => 'required|email|max:255|unique:users,email|unique:companies,contact_email',
             'phone'            => 'required|string|max:20',
-            'password'         => ['required', 'string', new \App\Rules\StrongPassword()],
-            // Business licence: required PDF/image, max 5 MB
-            'business_license'         => 'required|file|mimes:pdf,jpg,jpeg,png|max:5120',
             'preferred_payment_method' => 'nullable|in:cbe_transfer,telebirr_enterprise,awash_bank,chapa,cash,other',
             'branches'                 => 'nullable|string',   // JSON-encoded array of branches
         ], [
-            'business_license.required'  => 'A business licence document (PDF or image) is required.',
-            'business_license.mimes'     => 'The business licence must be a PDF, JPG, or PNG file.',
-            'business_license.max'       => 'The business licence file must not exceed 5 MB.',
+            'tin.required' => 'The TIN number is required.',
+            'email.unique' => 'This email address is already registered with FitAccess.',
         ]);
 
+        if (\App\Models\CompanyApplication::where('contact_email', $request->email)->where('status', 'pending')->exists()) {
+            throw \Illuminate\Validation\ValidationException::withMessages([
+                'email' => 'An application with this email address is already being reviewed. We will contact you soon.',
+            ]);
+        }
+
+        // Branch details only — their logins are created on approval
         $branches = \App\Services\BranchLoginService::validate(
             json_decode($request->branches ?? '[]', true) ?? [],
             \App\Services\BranchLoginService::COMPANY,
-            [$request->email]
+            [$request->email],
+            false
         );
 
-        // Store the file BEFORE the DB transaction so we can clean it up
-        // regardless of whether the transaction commits or rolls back.
-        $licensePath = $request->file('business_license')
-            ->store('licenses', 'public');
+        $application = DB::transaction(function () use ($request, $branches): \App\Models\CompanyApplication {
+            $app = \App\Models\CompanyApplication::create([
+                'company_name'             => $request->company_name,
+                'industry'                 => $this->mapIndustry($request->industry),
+                'company_size'             => $request->company_size,
+                'tin_number'               => trim($request->tin),
+                'preferred_payment_method' => $request->preferred_payment_method,
+                'contact_name'             => $request->contact_name,
+                'job_title'                => $request->job_title,
+                'contact_email'            => strtolower(trim($request->email)),
+                'contact_phone'            => $request->phone,
+                'branches'                 => $branches ?: null,
+                'status'                   => 'pending',
+            ]);
+            $app->update(['reference' => \App\Models\CompanyApplication::makeReference($app->id)]);
 
-        $result = null;
+            return $app;
+        });
+
+        \App\Services\ApplicationMailer::received(
+            \App\Services\ApplicationMailer::COMPANY,
+            $application->contact_name,
+            $application->contact_email,
+            $application->reference,
+            $application->company_name
+        );
+        \App\Services\ApplicationMailer::notifyAdmins(
+            \App\Services\ApplicationMailer::COMPANY,
+            $application->reference,
+            $application->company_name,
+            array_filter([
+                'Company'        => $application->company_name,
+                'Industry'       => $application->industry,
+                'Company size'   => $application->company_size,
+                'TIN'            => $application->tin_number,
+                'Contact person' => trim($application->contact_name . ($application->job_title ? " ({$application->job_title})" : '')),
+                'Email'          => $application->contact_email,
+                'Phone'          => $application->contact_phone,
+                'Branches'       => (string) count($branches),
+            ], fn($v) => $v !== null && $v !== '')
+        );
         try {
-            $result = DB::transaction(function () use ($request, $licensePath, $branches): array {
-                $company = Company::create([
-                    'name'                    => $request->company_name,
-                    'industry'                => $this->mapIndustry($request->industry),
-                    'contact_person'          => $request->contact_name,
-                    'contact_email'           => $request->email,
-                    'contact_phone'           => $request->phone,
-                    'city'                    => 'Addis Ababa',
-                    'tin_number'              => $request->tin,
-                    'business_license_path'    => $licensePath,
-                    'business_license_status'  => 'pending',
-                    'preferred_payment_method' => $request->preferred_payment_method,
-                    'is_active'                => false,
-                ]);
-
-                $user  = User::create([
-                    'name'      => $request->contact_name,
-                    'email'     => $request->email,
-                    'password'  => Hash::make($request->password),
-                    'role'      => 'company_hr',
-                    'phone'     => $request->phone,
-                    'is_active' => false,
-                ]);
-
-                // Each branch gets its own login. They stay inactive until the
-                // admin approves the company (see Company::setAccountsActive).
-                foreach ($branches as $b) {
-                    $branch = \App\Models\CompanyBranch::create([
-                        'company_id'     => $company->id,
-                        'name'           => $b['branch_name'],
-                        'contact_person' => $b['contact_person'],
-                        'city'           => $b['city'],
-                        'sub_city'       => $b['sub_city'],
-                        'address'        => $b['woreda'],
-                        'landmark'       => $b['landmark'],
-                        'phone'          => $b['contact_phone'],
-                        'is_active'      => true,
-                    ]);
-                    \App\Services\BranchLoginService::createLogin($b, 'company_hr', [
-                        'company_id'        => $company->id,
-                        'company_branch_id' => $branch->id,
-                    ]);
-                }
-
-                $token = app(SessionTokenService::class)->issue($user, request()->input('device_name'))->plainTextToken;
-
-                return compact('company', 'user', 'token');
-            });
+            app(TelegramService::class)->notifyAdminsNewCompanyApplication($application);
         } catch (\Throwable $e) {
-            Storage::disk('public')->delete($licensePath);
-            throw $e;
-        }
-
-        // Notify AFTER transaction so a Telegram failure never rolls back registration
-        try {
-            app(TelegramService::class)->notifyAdminsNewCompany($result['company'], $result['user']);
-        } catch (\Throwable $e) {
-            \Illuminate\Support\Facades\Log::error('Company registration Telegram notification failed: ' . $e->getMessage());
+            \Illuminate\Support\Facades\Log::error('Company application Telegram notification failed: ' . $e->getMessage());
         }
 
         return response()->json([
-            'message' => 'Registration submitted. Your account will be activated after licence review (2–3 business days).',
-            'user'    => new UserResource($result['user']),
-            'company' => new CompanyResource($result['company']),
-            'token'   => $result['token'],
+            'message'   => 'Thank you! Your application has been received. Our team will contact you within 2 business days.',
+            'reference' => $application->reference,
         ], 201);
     }
 
@@ -536,8 +518,11 @@ class AuthController extends Controller
     }
 
     /**
-     * Public: facility/partner self-registration from the partner sign-up page.
-     * Accepts multipart/form-data so the business licence file can be uploaded.
+     * Public: facility/partner application from the partner sign-up page.
+     *
+     * Only the application row is stored. The owner login, the gyms and the
+     * branch logins are created when an admin approves it, each with a
+     * temporary password that is emailed to them.
      */
     public function registerPartner(Request $request): JsonResponse
     {
@@ -546,14 +531,19 @@ class AuthController extends Controller
             'categories'       => 'required|string',   // JSON-encoded array
             'contact_person'   => 'required|string|max:255',
             'contact_phone'    => 'required|string|max:20',
-            'contact_email'    => 'required|email|unique:users,email',
+            'contact_email'    => 'required|email|max:255|unique:users,email',
             'tin_number'       => 'required|string|max:50',
-            'business_license' => 'nullable|file|mimes:pdf,jpg,jpeg,png|max:10240',
+            'website'          => 'nullable|url:http,https|max:255',
+            'has_permits'             => 'required|boolean',
+            'has_certified_equipment' => 'required|boolean',
+            'has_reception'           => 'required|boolean',
             'city'             => 'required|string|max:100',
             'sub_city'         => 'nullable|string|max:100',
             'woreda'           => 'required|string|max:255',
             'landmark'         => 'nullable|string|max:255',
             'google_maps_link' => 'nullable|string|max:500',
+            'latitude'         => 'nullable|numeric|between:-90,90|required_with:longitude',
+            'longitude'        => 'nullable|numeric|between:-180,180|required_with:latitude',
             'weekday_open'     => 'required|string|max:10',
             'weekday_close'    => 'required|string|max:10',
             'weekend_open'     => 'nullable|string|max:10',
@@ -563,92 +553,107 @@ class AuthController extends Controller
             'amenities'        => 'nullable|string',   // JSON-encoded array
             'branch_name'      => 'nullable|string|max:100',
             'branches'         => 'nullable|string',   // JSON-encoded array of extra branches
-            'password'         => ['required', 'string', new \App\Rules\StrongPassword()],
         ], [
-            'contact_email.unique'  => 'This email address is already registered.',
-            'business_license.mimes'=> 'Business licence must be PDF, JPG, or PNG.',
-            'business_license.max'  => 'Business licence must not exceed 10 MB.',
+            'contact_email.unique'  => 'This email address is already registered with FitAccess.',
+            'tin_number.required'   => 'The TIN number is required.',
+            'website.url'           => 'Please enter a valid website address, e.g. https://www.example.com.',
+            'has_permits.required'             => 'Please answer whether the facility has the required permits.',
+            'has_certified_equipment.required' => 'Please answer whether the facility has certified equipment.',
+            'has_reception.required'           => 'Please answer whether the facility has a staffed reception.',
         ]);
+
+        if (PartnerApplication::whereNull('parent_gym_id')
+                ->where('contact_email', $request->contact_email)
+                ->where('status', 'pending')->exists()) {
+            throw \Illuminate\Validation\ValidationException::withMessages([
+                'contact_email' => 'An application with this email address is already being reviewed. We will contact you soon.',
+            ]);
+        }
 
         // Decode JSON-encoded arrays from FormData
         $categories = json_decode($request->categories, true) ?? [];
         $amenities  = json_decode($request->amenities  ?? '[]', true) ?? [];
+        // Branch details only — their logins are created on approval
         $branches   = \App\Services\BranchLoginService::validate(
             json_decode($request->branches ?? '[]', true) ?? [],
             \App\Services\BranchLoginService::GYM,
-            [$request->contact_email]
+            [$request->contact_email],
+            false
         );
 
-        // Store licence file if provided
-        $licensePath = null;
-        if ($request->hasFile('business_license')) {
-            $licensePath = $request->file('business_license')
-                ->store('partner-licenses', 'public');
-        }
+        $partnerApplication = DB::transaction(function () use ($request, $categories, $amenities, $branches): PartnerApplication {
+            $app = PartnerApplication::create([
+                'user_id'                 => null,
+                'facility_name'           => $request->facility_name,
+                'branch_name'             => $branches ? ($request->branch_name ?: null) : null,
+                'categories'              => $categories,
+                'contact_person'          => $request->contact_person,
+                'contact_phone'           => $request->contact_phone,
+                'contact_email'           => strtolower(trim($request->contact_email)),
+                'tin_number'              => trim($request->tin_number),
+                'website'                 => $request->filled('website') ? trim($request->website) : null,
+                'has_permits'             => $request->boolean('has_permits'),
+                'has_certified_equipment' => $request->boolean('has_certified_equipment'),
+                'has_reception'           => $request->boolean('has_reception'),
+                'city'                    => $request->city,
+                'sub_city'                => $request->sub_city,
+                'woreda'                  => $request->woreda,
+                'landmark'                => $request->landmark,
+                'google_maps_link'        => $request->google_maps_link,
+                'latitude'                => $request->filled('latitude') ? (float) $request->latitude : null,
+                'longitude'               => $request->filled('longitude') ? (float) $request->longitude : null,
+                'weekday_open'            => $request->weekday_open,
+                'weekday_close'           => $request->weekday_close,
+                'weekend_open'            => $request->weekend_open ?: null,
+                'weekend_close'           => $request->weekend_close ?: null,
+                'operating_hours_summary' => $request->operating_hours,
+                'max_capacity'            => $request->max_capacity,
+                'amenities'               => $amenities,
+                'branches'                => $branches ?: null,
+                'status'                  => 'pending',
+            ]);
+            $app->update(['reference' => PartnerApplication::makeReference($app->id)]);
 
-        $partnerApplication = null;
-        try {
-            $partnerApplication = DB::transaction(function () use ($request, $categories, $amenities, $branches, $licensePath): PartnerApplication {
-                $user = User::create([
-                    'name'      => $request->contact_person,
-                    'email'     => $request->contact_email,
-                    'password'  => Hash::make($request->password),
-                    'role'      => 'gym_partner',
-                    'phone'     => $request->contact_phone,
-                    'is_active' => false,
-                ]);
+            return $app;
+        });
 
-                // Every branch gets its own login (inactive until the admin approves the application).
-                // Only the login's user_id is kept on the application; the password is never stored.
-                $branches = array_map(function (array $b): array {
-                    $login = \App\Services\BranchLoginService::createLogin($b, 'gym_partner');
-                    unset($b['password']);
-                    $b['user_id'] = $login->id;
-                    return $b;
-                }, $branches);
-
-                return PartnerApplication::create([
-                    'user_id'                 => $user->id,
-                    'facility_name'           => $request->facility_name,
-                    'branch_name'             => $branches ? ($request->branch_name ?: null) : null,
-                    'categories'              => $categories,
-                    'contact_person'          => $request->contact_person,
-                    'contact_phone'           => $request->contact_phone,
-                    'contact_email'           => $request->contact_email,
-                    'tin_number'              => $request->tin_number,
-                    'business_license_path'   => $licensePath,
-                    'city'                    => $request->city,
-                    'sub_city'                => $request->sub_city,
-                    'woreda'                  => $request->woreda,
-                    'landmark'                => $request->landmark,
-                    'google_maps_link'        => $request->google_maps_link,
-                    'weekday_open'            => $request->weekday_open,
-                    'weekday_close'           => $request->weekday_close,
-                    'weekend_open'            => $request->weekend_open ?: null,
-                    'weekend_close'           => $request->weekend_close ?: null,
-                    'operating_hours_summary' => $request->operating_hours,
-                    'max_capacity'            => $request->max_capacity,
-                    'amenities'               => $amenities,
-                    'branches'                => $branches ?: null,
-                    'status'                  => 'pending',
-                ]);
-            });
-        } catch (\Throwable $e) {
-            if ($licensePath) {
-                Storage::disk('public')->delete($licensePath);
-            }
-            throw $e;
-        }
-
-        // Notify AFTER transaction so a Telegram failure never rolls back registration
+        \App\Services\ApplicationMailer::received(
+            \App\Services\ApplicationMailer::PARTNER,
+            $partnerApplication->contact_person,
+            $partnerApplication->contact_email,
+            $partnerApplication->reference,
+            $partnerApplication->facility_name
+        );
+        \App\Services\ApplicationMailer::notifyAdmins(
+            \App\Services\ApplicationMailer::PARTNER,
+            $partnerApplication->reference,
+            $partnerApplication->facility_name,
+            array_filter([
+                'Facility'       => $partnerApplication->facility_name,
+                'Categories'     => implode(', ', $categories),
+                'TIN'            => $partnerApplication->tin_number,
+                'Website'        => $partnerApplication->website,
+                'Permits'             => $partnerApplication->has_permits ? 'Yes' : 'No',
+                'Certified equipment' => $partnerApplication->has_certified_equipment ? 'Yes' : 'No',
+                'Staffed reception'   => $partnerApplication->has_reception ? 'Yes' : 'No',
+                'Contact person' => $partnerApplication->contact_person,
+                'Email'          => $partnerApplication->contact_email,
+                'Phone'          => $partnerApplication->contact_phone,
+                'Address'        => trim($partnerApplication->woreda . ', ' . $partnerApplication->city, ', '),
+                'Capacity'       => (string) $partnerApplication->max_capacity,
+                'Branches'       => (string) count($branches),
+            ], fn($v) => $v !== null && $v !== '')
+        );
+        // Notify AFTER transaction so a Telegram failure never rolls back the application
         try {
             app(TelegramService::class)->notifyAdminsNewPartner($partnerApplication);
         } catch (\Throwable $e) {
-            \Illuminate\Support\Facades\Log::error('Partner registration Telegram notification failed: ' . $e->getMessage());
+            \Illuminate\Support\Facades\Log::error('Partner application Telegram notification failed: ' . $e->getMessage());
         }
 
         return response()->json([
-            'message' => 'Partner application submitted! Our team will review it within 2–3 business days.',
+            'message'   => 'Thank you! Your application has been received. Our team will contact you within 3 business days.',
+            'reference' => $partnerApplication->reference,
         ], 201);
     }
 
@@ -657,6 +662,13 @@ class AuthController extends Controller
      */
     private function mapIndustry(string $industry): string
     {
+        // The sign-up form already sends the stored key (e.g. "banking")
+        $keys = ['banking', 'ngo', 'government', 'international_school', 'hospital', 'real_estate',
+                 'telecom', 'airline', 'insurance', 'tech', 'embassy', 'other'];
+        if (in_array($industry, $keys, true)) {
+            return $industry;
+        }
+
         $map = [
             'Banking & Finance'                => 'banking',
             'Telecom & Technology'             => 'telecom',

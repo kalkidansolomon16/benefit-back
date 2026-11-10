@@ -9,12 +9,13 @@ class BillingInvoiceItem extends Model
 {
     protected $fillable = [
         'billing_invoice_id', 'plan_tier', 'plan_name',
-        'employee_count', 'unit_price', 'subtotal',
+        'employee_count', 'unit_price', 'months', 'subtotal',
     ];
 
     protected $casts = [
         'unit_price' => 'float',
         'subtotal'   => 'float',
+        'months'     => 'integer',
     ];
 
     public function invoice(): BelongsTo

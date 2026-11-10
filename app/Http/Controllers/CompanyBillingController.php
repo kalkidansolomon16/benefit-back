@@ -6,7 +6,9 @@ use App\Models\BillingInvoice;
 use App\Models\BillingNegotiation;
 use App\Models\BillingPayment;
 use App\Models\Company;
+use App\Models\Employee;
 use App\Models\PaymentMethod;
+use App\Support\BillingPeriod;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Storage;
@@ -82,6 +84,68 @@ class CompanyBillingController extends Controller
         $billingInvoice->load(['items', 'payments', 'latestNegotiation', 'companyBranch:id,name']);
 
         return response()->json($this->formatInvoice($billingInvoice, true));
+    }
+
+    /* ── Coverage summary + billing preference ─────────────────── */
+
+    /**
+     * How long the company's employees are paid for, and how often the company
+     * prefers to be invoiced. A branch login sees only its own employees.
+     */
+    public function coverage(): JsonResponse
+    {
+        $company = $this->getMyCompany();
+        $user    = auth()->user();
+
+        $employees = Employee::where('company_id', $company->id)
+            ->where('registration_status', 'approved')
+            ->where('is_enrolled', true)
+            ->when($user->isCompanyBranchLogin(), fn($q) => $q->where('company_branch_id', $user->company_branch_id))
+            ->get(['id', 'paid_until']);
+
+        $today = now()->startOfDay();
+        $soon  = $today->copy()->addDays(max(1, (int) config('fitaccess.billing_reminder_days', 7)));
+
+        $covered  = $employees->filter(fn($e) => $e->hasPaidAccess());
+        $expired  = $employees->filter(fn($e) => !$e->hasPaidAccess() && $e->paid_until);
+        $never    = $employees->filter(fn($e) => !$e->paid_until);
+        $expiring = $covered->filter(fn($e) => $e->paid_until && $e->paid_until->lte($soon));
+
+        $months = in_array((int) $company->billing_cycle_months, BillingPeriod::CYCLES, true) ? (int) $company->billing_cycle_months : 1;
+
+        return response()->json([
+            'billing_cycle_months' => $months,
+            'billing_cycle_label'  => BillingPeriod::label($months),
+            'cycles'               => array_map(fn($m) => ['months' => $m, 'label' => BillingPeriod::label($m)], BillingPeriod::CYCLES),
+            'can_change'           => !$user->isCompanyBranchLogin(),
+            'employees'            => $employees->count(),
+            'covered'              => $covered->count(),
+            'expired'              => $expired->count(),
+            'not_paid_yet'         => $never->count(),
+            'expiring_soon'        => $expiring->count(),
+            'covered_until'        => $covered->min('paid_until')?->toDateString(),
+            'covered_until_latest' => $covered->max('paid_until')?->toDateString(),
+            'grace_days'           => BillingPeriod::graceDays(),
+        ]);
+    }
+
+    /** Head office only: how often the company prefers to be invoiced */
+    public function updatePreference(Request $request): JsonResponse
+    {
+        $company = $this->getMyCompany();
+        if (auth()->user()->isCompanyBranchLogin()) {
+            abort(403, 'Only the head office can change how often the company is invoiced.');
+        }
+
+        $data = $request->validate([
+            'billing_cycle_months' => 'required|integer|in:' . implode(',', BillingPeriod::CYCLES),
+        ]);
+        $company->update($data);
+
+        return response()->json([
+            'message'              => 'Billing preference saved: ' . strtolower(BillingPeriod::label($data['billing_cycle_months'])) . '. Your next invoice will cover this period.',
+            'billing_cycle_months' => (int) $data['billing_cycle_months'],
+        ]);
     }
 
     /* ── Active payment methods (for dropdown) ────────────────── */
@@ -188,6 +252,9 @@ class CompanyBillingController extends Controller
             'id'             => $inv->id,
             'invoice_number' => $inv->invoice_number,
             'billing_period' => $inv->billing_period,
+            'period_months'  => (int) ($inv->period_months ?: 1),
+            'period_start'   => $inv->period_start?->toDateString(),
+            'period_end'     => $inv->period_end?->toDateString(),
             'total_amount'   => $inv->total_amount,
             'due_date'       => $inv->due_date?->toDateString(),
             'notes'          => $inv->notes,
@@ -203,6 +270,7 @@ class CompanyBillingController extends Controller
                 'plan_name'      => $i->plan_name,
                 'employee_count' => $i->employee_count,
                 'unit_price'     => $i->unit_price,
+                'months'         => (int) ($i->months ?: 1),
                 'subtotal'       => $i->subtotal,
             ])->values() ?? [],
             'latest_payment' => $inv->latestPayment ? [

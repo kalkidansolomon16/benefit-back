@@ -43,7 +43,7 @@ class CompanyController extends Controller
     {
         $companies = Company::query()
             ->when($request->search, fn($q) => $q->where('name', 'like', "%{$request->search}%"))
-            ->when($request->tier, fn($q) => $q->where('tier', $request->tier))
+            ->when($request->tier, fn($q) => $q->whereIn('tier', in_array($request->tier, ['premium', 'platinum'], true) ? ['premium', 'platinum'] : [$request->tier]))
             ->when($request->license_status, fn($q) => $q->where('business_license_status', $request->license_status))
             ->when(in_array($request->is_active, ['true', 'false'], true), fn($q) => $q->where('is_active', $request->is_active === 'true'))
             ->withCount([

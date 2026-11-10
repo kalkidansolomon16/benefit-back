@@ -55,7 +55,7 @@
             </p>
 
             <p>If you were not expecting this invitation, please ignore this email or
-            contact us at <a href="mailto:support@fitaccess.et">support@fitaccess.et</a>.</p>
+            contact us at <a href="mailto:auto@fit-access.com">auto@fit-access.com</a>.</p>
 
             <p>Welcome to the team!<br><strong>The FitAccess Team</strong></p>
         </div>

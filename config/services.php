@@ -39,6 +39,9 @@ return [
         'bot_token'    => env('TELEGRAM_BOT_TOKEN', ''),
         'bot_username' => env('TELEGRAM_BOT_USERNAME', 'FitAccessBot'),
         'proxy'        => env('TELEGRAM_PROXY', ''),
+        // Optional: Telegram sends this in X-Telegram-Bot-Api-Secret-Token on every update;
+        // set it, then run `php artisan telegram:webhook --set` so Telegram uses it.
+        'webhook_secret' => env('TELEGRAM_WEBHOOK_SECRET', ''),
     ],
 
     'chapa' => [

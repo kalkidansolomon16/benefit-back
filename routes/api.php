@@ -134,7 +134,8 @@ Route::prefix('v1')->group(function () {
     Route::post('auth/register/partner',   [AuthController::class, 'registerPartner'])->middleware('throttle:register');
     Route::get('public/companies',         [CompanyController::class, 'publicList']);
     Route::get('public/companies/{company}/branches', [CompanyController::class, 'publicBranches']);
-    Route::get('public/plans',             [MembershipPlanController::class, 'index']);
+    Route::post('public/card-status',      [\App\Http\Controllers\CardStatusController::class, 'check'])->middleware('throttle:card-check');
+    Route::get('public/plans',             [MembershipPlanController::class, 'publicIndex']);
 
     // ── Protected ───────────────────────────────────────────────────
     // Every group below is gated by account area (area: middleware, see
@@ -258,6 +259,8 @@ Route::prefix('v1')->group(function () {
                 Route::get('billing/invoices',                                      [CompanyBillingController::class, 'index']);
                 Route::get('billing/invoices/{billingInvoice}',                     [CompanyBillingController::class, 'show']);
                 Route::get('billing/payment-methods',                               [CompanyBillingController::class, 'paymentMethods']);
+                Route::get('billing/coverage',                                      [CompanyBillingController::class, 'coverage']);
+                Route::put('billing/preference',                                    [CompanyBillingController::class, 'updatePreference']);
                 Route::post('billing/invoices/{billingInvoice}/pay',                [CompanyBillingController::class, 'submitPayment']);
                 Route::post('billing/invoices/{billingInvoice}/negotiate',          [CompanyBillingController::class, 'submitNegotiation']);
                 Route::post('billing/invoices/{billingInvoice}/chapa/initialize',   [ChapaController::class, 'initialize']);
@@ -400,6 +403,11 @@ Route::prefix('v1')->group(function () {
             Route::patch('companies/{company}/license-status',     [CompanyController::class, 'updateLicenseStatus'])->middleware('permission:companies.edit');
             Route::post('companies/{company}/deactivate',          [AdminBillingController::class, 'deactivateCompany'])->middleware('permission:companies.edit|billing.create');
 
+            // Employer applications from the public form (no account exists until approved)
+            Route::get('company-applications', [\App\Http\Controllers\CompanyApplicationController::class, 'index'])->middleware('permission:companies.view');
+            Route::post('company-applications/{companyApplication}/approve', [\App\Http\Controllers\CompanyApplicationController::class, 'approve'])->middleware('permission:companies.create');
+            Route::post('company-applications/{companyApplication}/reject', [\App\Http\Controllers\CompanyApplicationController::class, 'reject'])->middleware('permission:companies.create');
+
             // Employees (the billing page also reads them)
             // pending-admin-approval also feeds the badge every admin layout polls.
             Route::get( 'employees/pending-admin-approval',    [EmployeeController::class, 'pendingAdminApproval']);
@@ -480,6 +488,7 @@ Route::prefix('v1')->group(function () {
             Route::prefix('admin/billing')->group(function () {
                 // Invoices
                 Route::get('invoices',                                      [AdminBillingController::class, 'index'])->middleware('permission:billing.view');
+                Route::post('invoices/preview',                             [AdminBillingController::class, 'preview'])->middleware('permission:billing.create');
                 Route::post('invoices/generate',                            [AdminBillingController::class, 'generate'])->middleware('permission:billing.create');
                 Route::get('invoices/{billingInvoice}',                     [AdminBillingController::class, 'show'])->middleware('permission:billing.view');
                 Route::post('invoices/{billingInvoice}/send',               [AdminBillingController::class, 'send'])->middleware('permission:billing.send');

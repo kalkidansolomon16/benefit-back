@@ -47,7 +47,7 @@
                this code when prompted.</p>
 
             <p>Need help? Contact us at
-               <a href="mailto:support@fitaccess.et">support@fitaccess.et</a>.</p>
+               <a href="mailto:auto@fit-access.com">auto@fit-access.com</a>.</p>
 
             <p>The FitAccess Team</p>
         </div>

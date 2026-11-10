@@ -21,6 +21,22 @@ return [
         explode(',', env('TRUSTED_HOSTS', 'fitaccess-api.kalkidan.net,www.fitaccess-api.kalkidan.net'))
     ))),
 
+    // Inboxes that receive "new application" notices (comma-separated), in addition
+    // to active admin accounts. Falls back to the sending address so a notice
+    // always reaches a mailbox FitAccess controls.
+    'admin_notification_emails' => array_values(array_filter(array_map(
+        'trim',
+        explode(',', (string) env('ADMIN_NOTIFICATION_EMAILS', env('MAIL_FROM_ADDRESS', '')))
+    ))),
+
+    // Days an employee may keep checking in after their company's paid period
+    // ends, before access is refused (0 = stop the day after the period ends).
+    'billing_grace_days' => (int) env('BILLING_GRACE_DAYS', 0),
+
+    // Days before a coverage period ends that the company and FitAccess are
+    // reminded to renew (sent by the daily `billing:coverage` command).
+    'billing_reminder_days' => (int) env('BILLING_REMINDER_DAYS', 7),
+
     // On in production by default; off for local development and tests.
     'enforce_trusted_hosts' => filter_var(
         env('ENFORCE_TRUSTED_HOSTS', env('APP_ENV') === 'production'),

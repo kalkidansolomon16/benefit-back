@@ -21,7 +21,7 @@ class DatabaseSeeder extends Seeder
         // (never a hardcoded/guessable one) and must change it on first login.
         $adminPassword = Str::password(16);
         $admin = User::firstOrCreate(
-            ['email' => 'admin@fitaccess.com'],
+            ['email' => env('SUPER_ADMIN_EMAIL', 'auto@fit-access.com')],
             [
                 'name'                 => 'FitAccess Admin',
                 'password'             => Hash::make($adminPassword),
@@ -46,7 +46,7 @@ class DatabaseSeeder extends Seeder
 
         $this->command->info('✅ FitAccess seed data created.');
         if ($admin->wasRecentlyCreated) {
-            $this->command->warn("   Super Admin: admin@fitaccess.com / {$adminPassword}  (save this now — shown once, must change on first login)");
+            $this->command->warn("   Super Admin: " . $admin->email . " / {$adminPassword}  (save this now — shown once, must change on first login)");
         }
         if ($hr->wasRecentlyCreated) {
             $this->command->warn("   Demo HR:     hr@demo.com / {$hrPassword}  (save this now — shown once, must change on first login)");

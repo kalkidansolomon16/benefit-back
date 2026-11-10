@@ -195,6 +195,9 @@ class MobileController extends Controller
                 'phone'        => $user->phone,
                 'member_code'  => $user->member_code,
                 'fan_number'   => $user->fan_number,
+                'card_number'  => $user->employee?->card_number,
+                'paid_until'   => $user->employee?->paid_until?->toDateString(),
+                'access_active'=> $user->employee ? $user->employee->hasPaidAccess() : null,
                 'photo_url'    => $user->photo_path,
                 'job_title'    => $user->employee?->job_title,
                 'department'   => $user->employee?->department,
@@ -574,10 +577,6 @@ class MobileController extends Controller
 
     private function accessibleTiers(string $tier): array
     {
-        return match ($tier) {
-            'platinum'   => ['basic', 'basic_plus', 'platinum', 'premium'],
-            'basic_plus' => ['basic', 'basic_plus'],
-            default      => ['basic'],
-        };
+        return \App\Support\Tier::gymTiersFor($tier);
     }
 }

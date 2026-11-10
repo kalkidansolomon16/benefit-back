@@ -31,46 +31,30 @@ class EmployeePortalController extends Controller
         $company  = $employee->company;
         $membership = $employee->activeMembership;
 
-        // ── Resolve plan dynamically from membership_plans table ────
-        $levelToTier = ['chief' => 'platinum', 'director' => 'basic_plus', 'manager' => 'basic', 'staff' => 'basic'];
-        $employeeLevel = $employee->level ?? 'staff';
-        $canonicalTier = $levelToTier[$employeeLevel] ?? 'basic';
-
+        // ── Resolve the employee's package ──────────────────────────
+        // HR's package choice is saved as the employee level (chief = Premium …);
+        // App\Support\Tier is the single rule shared with check-in and billing.
+        $canonicalTier  = \App\Support\Tier::forLevel($employee->level ?? 'staff');
         $allActivePlans = MembershipPlan::where('is_active', true)->orderBy('monthly_fee_etb')->get();
 
-        // Plan tiers are typed by admins ("Fit Basic", "fit_basic_plus"), so compare them in a
-        // normalised form: lower-case, every run of non-alphanumerics turned into "_".
-        $norm = fn(string $t): string => trim(preg_replace('/[^a-z0-9]+/', '_', strtolower($t)), '_');
+        $myPlan = \App\Services\MembershipService::resolvePlan($canonicalTier);
 
-        // Flexible plan finder: exact match → suffix match (e.g. 'fit_basic' ends with '_basic') → cheapest
-        $myPlan = $allActivePlans->first(fn($p) => $norm($p->tier) === $canonicalTier)
-            ?? $allActivePlans->first(fn($p) => str_ends_with($norm($p->tier), '_' . $canonicalTier))
-            ?? $allActivePlans->first();
+        $planKey   = $canonicalTier;
+        $planName  = $myPlan?->name ?? ucwords(str_replace('_', ' ', $canonicalTier));
+        $planFee   = (float) ($myPlan?->monthly_fee_etb ?? 0);
+        $myGymTier = $canonicalTier;
 
-        $planKey  = $myPlan?->tier  ?? $canonicalTier;
-        $planName = $myPlan?->name  ?? ucfirst(str_replace('_', ' ', $canonicalTier));
-        $planFee  = (float) ($myPlan?->monthly_fee_etb ?? 0);
+        // Higher packages include the lower ones' gyms (Premium → all gyms)
+        $accessibleTiers = \App\Support\Tier::gymTiersFor($canonicalTier);
 
-        // Normalize a plan tier key to a canonical gym tier (strips brand prefix).
-        // e.g. 'fit_basic' → 'basic', 'fit_basic_plus' → 'basic_plus', 'fit_premium' → 'premium'
-        $gymTierOf = function (string $tier) use ($norm): string {
-            $tier = $norm($tier);
-            foreach (['platinum', 'premium', 'basic_plus', 'basic'] as $c) {
-                if ($tier === $c || str_ends_with($tier, '_' . $c)) return $c;
-            }
-            return $tier;
-        };
-
-        $myGymTier = $gymTierOf($planKey);
-
-        // Only show gyms that match the employee's own plan tier exactly
-        $accessibleTiers = [$myGymTier];
-
-        // Plan label for the employee's own tier
-        $accessiblePlanLabels = $allActivePlans
-            ->filter(fn($p) => $gymTierOf($p->tier) === $myGymTier)
-            ->mapWithKeys(fn($p) => [$gymTierOf($p->tier) => $p->name])
-            ->toArray();
+        // Plan name for each gym tier, for the tier pills and the filter
+        // (keyed by canonical tier: basic / basic_plus / premium, each once)
+        $displayTiers = array_values(array_unique(array_map([\App\Support\Tier::class, 'canonical'], $accessibleTiers)));
+        $accessiblePlanLabels = [];
+        foreach ($displayTiers as $t) {
+            $label = $allActivePlans->first(fn($p) => \App\Support\Tier::canonical($p->tier) === $t)?->name;
+            $accessiblePlanLabels[$t] = $label ?? ucwords(str_replace('_', ' ', $t));
+        }
 
         // ── Check-in stats ──────────────────────────────────────────
         $allCheckins   = $employee->checkins;
@@ -97,7 +81,7 @@ class EmployeePortalController extends Controller
         $foundGyms = Gym::where('is_active', true)
             ->whereIn('tier', $accessibleTiers)
             ->orderBy('name')
-            ->get(['id', 'name', 'tier', 'sub_city', 'city', 'address', 'facilities', 'opening_hours', 'max_capacity']);
+            ->get(['id', 'name', 'tier', 'sub_city', 'city', 'address', 'latitude', 'longitude', 'facilities', 'opening_hours', 'max_capacity']);
         $crowd = Gym::crowdFor($foundGyms);
 
         $gyms = $foundGyms
@@ -109,6 +93,8 @@ class EmployeePortalController extends Controller
                 'sub_city'     => $g->sub_city,
                 'city'         => $g->city,
                 'address'      => $g->address,
+                'latitude'     => $g->latitude !== null ? (float) $g->latitude : null,
+                'longitude'    => $g->longitude !== null ? (float) $g->longitude : null,
                 'facilities'   => is_array($g->facilities) ? $g->facilities : [],
                 'opening_hours'=> $g->opening_hours,
             ]);
@@ -119,6 +105,7 @@ class EmployeePortalController extends Controller
                 'email'      => $user?->email,
                 'phone'      => $user?->phone,
                 'fan_number' => $employee->fan_number,
+                'card_number' => $employee->card_number,
                 'job_title'  => $employee->job_title,
                 'department' => $employee->department,
                 'branch'     => $employee->branch,
@@ -131,9 +118,10 @@ class EmployeePortalController extends Controller
             'pass' => [
                 'plan_name'       => $planName,
                 'plan_key'        => $planKey,
-                'status'          => $membership?->status ?? ($employee->is_enrolled ? 'active' : 'inactive'),
-                'valid_until'     => $membership?->end_date?->toDateString(),
-                'accessible_tiers'=> $accessibleTiers,
+                'status'          => $employee->accessStatus(),
+                'valid_until'     => $employee->paid_until?->toDateString(),
+                'access_message'  => $employee->hasPaidAccess() ? null : $employee->paidAccessMessage(),
+                'accessible_tiers'=> $displayTiers,
                 'plan_labels'     => $accessiblePlanLabels,
             ],
             'stats' => [

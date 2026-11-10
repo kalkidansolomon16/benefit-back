@@ -21,7 +21,7 @@ class FitAccessNotificationMail extends Mailable
         public ?string $buttonUrl = null,
         public string $color = '#22c55e',  // green = approved, red = rejected, blue = info
     ) {
-        $this->buttonUrl = $buttonUrl ?? env('FRONTEND_URL', 'http://localhost:5173') . '/login';
+        $this->buttonUrl = $buttonUrl ?? config('app.frontend_url') . '/login';
     }
 
     public function envelope(): Envelope

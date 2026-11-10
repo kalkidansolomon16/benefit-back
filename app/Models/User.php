@@ -138,7 +138,11 @@ class User extends Authenticatable implements CanResetPasswordContract
     /* ── Role helpers ──────────────────────────────────────────── */
 
     public function isSuperAdmin(): bool { return $this->role === 'super_admin'; }
-    public function isAdmin(): bool      { return in_array($this->role, ['fitaccess_admin', 'admin_finance', 'admin_support']); }
+    public function isAdmin(): bool
+    {
+        return in_array($this->role, ['super_admin', 'fitaccess_admin', 'admin_finance', 'admin_support'], true)
+            || in_array($this->role, self::dynamicAdminSubRoles(), true);
+    }
     public function isHR(): bool         { return in_array($this->role, ['company_hr', 'company_finance', 'company_ceo']); }
     public function isEmployee(): bool   { return $this->role === 'employee'; }
     public function isGymUser(): bool    { return in_array($this->role, ['gym_partner', 'gym_staff']); }
@@ -156,6 +160,18 @@ class User extends Authenticatable implements CanResetPasswordContract
             ->pluck('name')
             ->toArray();
     }
+    /**
+     * Every role an admin team member can have: the built-in Finance / Support
+     * roles plus any custom admin roles created on the Roles page.
+     */
+    public static function adminTeamRoles(): array
+    {
+        return array_values(array_diff(
+            array_unique(array_merge(self::ADMIN_SUB_ROLES, self::dynamicAdminSubRoles())),
+            ['fitaccess_admin', 'super_admin']
+        ));
+    }
+
     /** Roles HR can create */
     public const COMPANY_SUB_ROLES = ['co_hr', 'co_executive', 'co_finance', 'company_finance', 'company_ceo'];
     /** Roles gym owner can create */

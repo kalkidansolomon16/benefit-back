@@ -236,15 +236,18 @@ class ChapaController extends Controller
             ]);
 
             $result = MembershipService::provisionForInvoice($payment->invoice);
+            \App\Services\BillingMailer::paymentConfirmed($payment->invoice->load(['company', 'companyBranch:id,name']), $result['employees']);
 
             return [
                 'code' => 200,
                 'body' => [
                     'status'              => 'success',
                     'message'             => sprintf(
-                        'Payment confirmed! %d employee(s) now have active gym memberships.',
-                        $result['memberships']
+                        'Payment confirmed! %d employee(s) now have access%s.',
+                        $result['employees'],
+                        $result['paid_until'] ? ' until ' . \Illuminate\Support\Carbon::parse($result['paid_until'])->format('j M Y') : ''
                     ),
+                    'paid_until'          => $result['paid_until'],
                     'employees_updated'   => $result['employees'],
                     'memberships_created' => $result['memberships'],
                     'invoice'             => $this->invoiceSummary($payment->invoice->fresh()),

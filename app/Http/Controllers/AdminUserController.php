@@ -30,7 +30,7 @@ class AdminUserController extends Controller
     {
         $this->requiresManage();
 
-        $users = User::whereIn('role', User::ADMIN_SUB_ROLES)
+        $users = User::whereIn('role', User::adminTeamRoles())
             ->orderByDesc('created_at')
             ->get()
             ->map(fn($u) => $this->formatUser($u));
@@ -355,7 +355,7 @@ class AdminUserController extends Controller
 
     private function assertSubRole(User $user): void
     {
-        if (!in_array($user->role, User::ADMIN_SUB_ROLES)) {
+        if (!in_array($user->role, User::adminTeamRoles(), true)) {
             abort(403, 'Cannot manage this user type here.');
         }
     }

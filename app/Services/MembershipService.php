@@ -14,11 +14,7 @@ class MembershipService
      */
     public static function tierFromLevel(?string $level): string
     {
-        return match ($level) {
-            'chief'    => 'platinum',
-            'director' => 'basic_plus',
-            default    => 'basic',
-        };
+        return \App\Support\Tier::forLevel($level);
     }
 
     /**
@@ -27,11 +23,7 @@ class MembershipService
      */
     public static function allowedGymTiers(string $planTier): array
     {
-        return match ($planTier) {
-            'platinum'   => ['basic', 'basic_plus', 'platinum'],
-            'basic_plus' => ['basic', 'basic_plus'],
-            default      => ['basic'],
-        };
+        return \App\Support\Tier::gymTiersFor($planTier);
     }
 
     /**
@@ -78,9 +70,11 @@ class MembershipService
      *
      * @param  Employee  $employee  A fully-loaded Employee instance.
      * @param  string    $tier      Plan tier: 'basic' | 'basic_plus' | 'platinum'
+     * @param  \Illuminate\Support\Carbon|null  $until  Last day the memberships run
+     *         (the employee's paid_until). Existing memberships are moved to this date too.
      * @return int  Number of newly-created membership rows.
      */
-    public static function provisionForEmployee(Employee $employee, string $tier): int
+    public static function provisionForEmployee(Employee $employee, string $tier, ?\Illuminate\Support\Carbon $until = null): int
     {
         $allowedTiers = self::allowedGymTiers($tier);
 
@@ -91,7 +85,7 @@ class MembershipService
             ->get();
 
         $created = 0;
-        $endDate  = now()->addYear()->toDateString();
+        $endDate  = ($until ?? $employee->paid_until ?? now()->addYear())->toDateString();
 
         foreach ($gyms as $gym) {
             // Restore any soft-deleted row for this employee+gym pair first
@@ -111,8 +105,10 @@ class MembershipService
                     ]);
                     $gym->increment('current_members');
                     $created++;
+                } elseif ($until && $existing->status !== 'suspended' && $existing->status !== 'cancelled') {
+                    // A new paid period: run the membership to the new end date
+                    $existing->update(['status' => 'active', 'end_date' => $endDate, 'plan_id' => $plan?->id ?? $existing->plan_id]);
                 }
-                // Already exists and not deleted → leave untouched
             } else {
                 Membership::create([
                     'employee_id' => $employee->id,
@@ -131,66 +127,58 @@ class MembershipService
     }
 
     /**
-     * Provision memberships for every enrolled+approved employee of a company
-     * after their invoice payment is verified.
+     * Settle a paid invoice: every employee it covers gets access until the end
+     * of the invoice's coverage period (paid_until), and their gym memberships
+     * are created or moved to that date.
      *
-     * Sets payment_status = 'paid' and stamps paid_period with the billing
-     * period just settled, so the next billing cycle's invoice generation can
-     * tell "paid for last period" apart from "paid for this period".
+     * Invoices list their employees (billing_invoice_employees). Invoices from
+     * before that list existed fall back to "the employees the invoice was for"
+     * by company / branch / single employee.
      *
-     * @param  int  $companyId
-     * @param  string|null  $billingPeriod  The billing_period of the invoice just paid.
-     * @return array{employees: int, memberships: int}
+     * @return array{employees: int, memberships: int, paid_until: string|null}
      */
-    /** Settle exactly the employees an invoice covers */
     public static function provisionForInvoice(\App\Models\BillingInvoice $invoice): array
     {
-        return self::provisionForCompany(
-            $invoice->company_id,
-            $invoice->billing_period,
-            $invoice->employee_id,
-            (bool) $invoice->branch_scoped,
-            $invoice->company_branch_id
-        );
-    }
+        $until = $invoice->period_end
+            ? $invoice->period_end->copy()
+            : now()->addMonthsNoOverflow(max(1, (int) ($invoice->period_months ?: 1)))->subDay();
 
-    public static function provisionForCompany(
-        int $companyId,
-        ?string $billingPeriod = null,
-        ?int $employeeId = null,
-        bool $branchScoped = false,
-        ?int $branchId = null
-    ): array {
-        $employees = Employee::where('company_id', $companyId)
-            ->where('registration_status', 'approved')
-            ->where('is_enrolled', true)
-            ->where(function ($q) use ($billingPeriod) {
-                $q->whereNull('paid_period')
-                  ->orWhere('paid_period', '!=', $billingPeriod);
-            })
-            ->when($employeeId, fn($q) => $q->where('id', $employeeId))
-            // A per-branch invoice settles only that branch's employees (null = head office)
-            ->when($branchScoped && !$employeeId, fn($q) => $branchId
-                ? $q->where('company_branch_id', $branchId)
-                : $q->whereNull('company_branch_id'))
-            ->get();
+        $employees = $invoice->coveredEmployees()->get();
+
+        if ($employees->isEmpty()) {
+            $employees = Employee::where('company_id', $invoice->company_id)
+                ->where('registration_status', 'approved')
+                ->where('is_enrolled', true)
+                ->when($invoice->employee_id, fn($q) => $q->where('id', $invoice->employee_id))
+                ->when($invoice->branch_scoped && !$invoice->employee_id, fn($q) => $invoice->company_branch_id
+                    ? $q->where('company_branch_id', $invoice->company_branch_id)
+                    : $q->whereNull('company_branch_id'))
+                ->where(fn($q) => $q->whereNull('paid_until')->orWhereDate('paid_until', '<', $until))
+                ->get();
+        }
 
         $totalMemberships = 0;
 
         foreach ($employees as $employee) {
-            $tier = self::tierFromLevel($employee->level);
-            $totalMemberships += self::provisionForEmployee($employee, $tier);
+            // Never shorten coverage an employee already has
+            $newUntil = $employee->paid_until && $employee->paid_until->gt($until)
+                ? $employee->paid_until->copy()
+                : $until->copy();
 
-            // Mark employee as paid for this specific billing period
             $employee->update([
                 'payment_status' => 'paid',
-                'paid_period'    => $billingPeriod,
+                'paid_period'    => $invoice->billing_period,
+                'paid_until'     => $newUntil->toDateString(),
             ]);
+
+            $tier = self::tierFromLevel($employee->level);
+            $totalMemberships += self::provisionForEmployee($employee, $tier, $newUntil);
         }
 
         return [
             'employees'   => $employees->count(),
             'memberships' => $totalMemberships,
+            'paid_until'  => $until->toDateString(),
         ];
     }
 }

@@ -62,6 +62,8 @@ class HRBranchController extends Controller
             'sub_city'        => $b->sub_city,
             'address'         => $b->address,
             'landmark'        => $b->landmark,
+            'latitude'        => $b->latitude,
+            'longitude'       => $b->longitude,
             'phone'           => $b->phone,
             'is_active'       => $b->is_active,
             'login_email'     => $login?->email,
@@ -114,6 +116,8 @@ class HRBranchController extends Controller
                 'sub_city'       => $branch['sub_city'],
                 'address'        => $branch['woreda'],
                 'landmark'       => $branch['landmark'],
+                'latitude'       => $branch['latitude'],
+                'longitude'      => $branch['longitude'],
                 'phone'          => $branch['contact_phone'],
                 'is_active'      => true,
             ]);
@@ -149,6 +153,8 @@ class HRBranchController extends Controller
             'sub_city'       => 'nullable|string|max:100',
             'address'        => 'sometimes|required|string|max:255',
             'landmark'       => 'nullable|string|max:255',
+            'latitude'       => 'nullable|numeric|between:-90,90|required_with:longitude',
+            'longitude'      => 'nullable|numeric|between:-180,180|required_with:latitude',
             'phone'          => 'nullable|string|max:20',
             'is_active'      => 'sometimes|boolean',
         ]);

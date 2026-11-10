@@ -22,7 +22,7 @@ class SecurityHeaders
         $response->headers->set('X-Frame-Options', 'DENY');
         $response->headers->set('X-Content-Type-Options', 'nosniff');
         $response->headers->set('Referrer-Policy', 'strict-origin-when-cross-origin');
-        $response->headers->set('Permissions-Policy', 'camera=(), microphone=(), geolocation=(), payment=()');
+        $response->headers->set('Permissions-Policy', 'camera=(), microphone=(), geolocation=(self), payment=()');
         $response->headers->set('Cross-Origin-Opener-Policy', 'same-origin');
         $response->headers->set('Cross-Origin-Resource-Policy', 'same-site');
 
@@ -40,9 +40,9 @@ class SecurityHeaders
                 "default-src 'self'",
                 "script-src 'self' https://www.google.com https://www.gstatic.com",
                 "style-src 'self' 'unsafe-inline'",
-                "img-src 'self' data:",
+                "img-src 'self' data: https://tile.openstreetmap.org",
                 "font-src 'self' data:",
-                "connect-src 'self' https://www.google.com",
+                "connect-src 'self' https://www.google.com https://nominatim.openstreetmap.org",
                 "frame-src https://www.google.com",
                 "object-src 'none'",
                 "base-uri 'self'",
