@@ -11,7 +11,6 @@ use App\Models\PartnerApplication;
 use App\Models\User;
 use App\Services\RecaptchaService;
 use App\Services\SessionTokenService;
-use App\Services\RecaptchaService;
 use App\Services\TelegramService;
 use App\Services\TwoFactorService;
 use Illuminate\Http\JsonResponse;
@@ -261,96 +260,6 @@ class AuthController extends Controller
      */
     private function respondWithSession(Request $request, User $user): JsonResponse
     {
-        if (in_array($user->role, $this->mfaRequiredRoles(), true)) {
-            Auth::logout();
-            return $this->beginMfaChallenge($user);
-        }
-
-        return $this->respondWithSession($request, $user);
-    }
-
-    /**
-     * Roles that must complete TOTP two-factor authentication to log in.
-     */
-    private function mfaRequiredRoles(): array
-    {
-        return array_merge(User::ADMIN_ROLES, self::MFA_EXTRA_ROLES);
-    }
-
-    /**
-     * Password was correct but the account requires MFA before a session
-     * token is issued. The QR code is only shown the first time (until the
-     * user confirms a code); after that the saved secret is reused and the
-     * user just enters the 6-digit code from their authenticator app.
-     */
-    private function beginMfaChallenge(User $user): JsonResponse
-    {
-        $mfaToken = Str::random(64);
-        Cache::put("mfa_pending:{$mfaToken}", $user->id, now()->addMinutes(10));
-
-        // Already enrolled: skip the QR and ask for the code only
-        if ($user->google2fa_enabled && $user->google2fa_secret) {
-            return response()->json([
-                'mfa_setup_required' => true,
-                'mfa_enrolled'       => true,
-                'mfa_token'          => $mfaToken,
-                'qr_code'            => null,
-                'secret'             => null,
-                'message'            => 'Enter the 6-digit code from your authenticator app to finish signing in.',
-            ]);
-        }
-
-        $tfa    = app(TwoFactorService::class);
-        $secret = $tfa->generateSecretKey();
-        $user->forceFill(['google2fa_secret' => $secret])->save();
-
-        return response()->json([
-            'mfa_setup_required' => true,
-            'mfa_enrolled'       => false,
-            'mfa_token'          => $mfaToken,
-            'qr_code'            => $tfa->getQrCodeDataUri($user->email, $secret),
-            'secret'             => $secret,
-            'message'            => 'Two-factor authentication is required for your role. Scan the QR code with an authenticator app (Google Authenticator, Authy, etc.), then enter the 6-digit code to finish signing in.',
-        ]);
-    }
-
-    /**
-     * Step 2 of login: verify the code (against the new secret on first
-     * setup, or the saved one afterwards) and issue the real session.
-     */
-    public function mfaSetupConfirm(Request $request): JsonResponse
-    {
-        $request->validate([
-            'mfa_token' => 'required|string',
-            'code'      => 'required|digits:6',
-        ]);
-
-        $pendingKey = "mfa_pending:{$request->input('mfa_token')}";
-        $userId     = Cache::get($pendingKey);
-        $user       = $userId ? User::find($userId) : null;
-
-        if (!$user || !$user->google2fa_secret) {
-            return response()->json(['message' => 'This login session has expired. Please sign in again.'], 422);
-        }
-
-        $tfa = app(TwoFactorService::class);
-        if (!$tfa->verifyKey($user->google2fa_secret, $request->input('code'))) {
-            return response()->json(['message' => 'Invalid authentication code. Please try again.'], 422);
-        }
-
-        $user->forceFill(['google2fa_enabled' => true])->save();
-
-        Cache::forget($pendingKey);
-
-        return $this->respondWithSession($request, $user);
-    }
-
-    /**
-     * Issues the Sanctum token and builds the standard post-login payload.
-     * Shared by direct login (no MFA required) and both MFA completion steps.
-     */
-    private function respondWithSession(Request $request, User $user): JsonResponse
-    {
         // Server-side expiry: idle timeout + absolute lifetime by account type;
         // members also get a rotating refresh token (15-minute access token).
         $pair    = app(SessionTokenService::class)->issueSession($user, $request->input('device_name'), [$user->role]);
@@ -510,7 +419,27 @@ class AuthController extends Controller
                     'is_active' => false,
                 ]);
 
-                $token = $user->createToken('fitaccess-token')->plainTextToken;
+                // Each branch gets its own login. They stay inactive until the
+                // admin approves the company (see Company::setAccountsActive).
+                foreach ($branches as $b) {
+                    $branch = \App\Models\CompanyBranch::create([
+                        'company_id'     => $company->id,
+                        'name'           => $b['branch_name'],
+                        'contact_person' => $b['contact_person'],
+                        'city'           => $b['city'],
+                        'sub_city'       => $b['sub_city'],
+                        'address'        => $b['woreda'],
+                        'landmark'       => $b['landmark'],
+                        'phone'          => $b['contact_phone'],
+                        'is_active'      => true,
+                    ]);
+                    \App\Services\BranchLoginService::createLogin($b, 'company_hr', [
+                        'company_id'        => $company->id,
+                        'company_branch_id' => $branch->id,
+                    ]);
+                }
+
+                $token = app(SessionTokenService::class)->issue($user, request()->input('device_name'))->plainTextToken;
 
                 return compact('company', 'user', 'token');
             });

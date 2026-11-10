@@ -28,15 +28,14 @@
     RewriteCond %{REQUEST_URI} (.+)/$
     RewriteRule ^ %1 [L,R=301]
 
-    # Serve real files and directories directly (assets/, favicon, storage/, etc.)
-    RewriteCond %{REQUEST_FILENAME} -f [OR]
-    RewriteCond %{REQUEST_FILENAME} -d
-    RewriteRule ^ - [L]
+    # Handle X-XSRF-Token header
+    RewriteCond %{HTTP:x-xsrf-token} .
+    RewriteRule .* - [E=HTTP_X_XSRF_TOKEN:%{HTTP:X-XSRF-Token}]
 
-    # API and Sanctum routes -> Laravel's index.php
-    RewriteRule ^api/ index.php [L]
-    RewriteRule ^sanctum/ index.php [L]
-
-    # All other routes -> Vue SPA (index.html)
-    RewriteRule ^ index.html [L]
+    # Send everything that isn't a real file or folder to Laravel.
+    # This folder serves the API only: the web app is deployed separately
+    # (never copy a frontend build or project files into public/).
+    RewriteCond %{REQUEST_FILENAME} !-d
+    RewriteCond %{REQUEST_FILENAME} !-f
+    RewriteRule ^ index.php [L]
 </IfModule>
