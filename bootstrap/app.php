@@ -13,8 +13,6 @@ return Application::configure(basePath: dirname(__DIR__))
     )
     ->withMiddleware(function (Middleware $middleware): void {
         $middleware->prepend(\Illuminate\Http\Middleware\HandleCors::class);
-        // Runs first of all: reject forged Host headers (INSA CWE-20).
-        $middleware->prepend(\App\Http\Middleware\RejectUntrustedHost::class);
         $middleware->append(\App\Http\Middleware\SecurityHeaders::class);
         $middleware->alias([
             'permission' => \App\Http\Middleware\CheckPermission::class,
