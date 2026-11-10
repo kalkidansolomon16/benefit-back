@@ -21,8 +21,14 @@ return Application::configure(basePath: dirname(__DIR__))
             'permission' => \App\Http\Middleware\CheckPermission::class,
             'branch.write' => \App\Http\Middleware\EnsureBranchWritable::class,
         ]);
+        // There is no web login page: never look up route('login') for API
+        // guests (that lookup threw a 500 for requests without Accept: json).
+        $middleware->redirectGuestsTo(fn (\Illuminate\Http\Request $request) => $request->is('api/*') ? null : '/');
     })
     ->withExceptions(function (Exceptions $exceptions): void {
+        // API errors are always JSON, whatever the client's Accept header says.
+        $exceptions->shouldRenderJsonWhen(fn (\Illuminate\Http\Request $request) => $request->is('api/*') || $request->expectsJson());
+
         $exceptions->render(function (\Throwable $e, \Illuminate\Http\Request $request) {
             if (! $request->is('api/*') || ! app()->environment('production')) {
                 return null;

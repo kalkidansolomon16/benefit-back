@@ -199,6 +199,14 @@ class AccessControlTest extends TestCase
         $this->as($frontDesk)->getJson('/api/v1/hr/my-company')->assertForbidden();
     }
 
+    public function test_guests_get_json_401_even_without_an_accept_header(): void
+    {
+        // Used to throw "Route [login] not defined" (500) for browser-style requests.
+        $this->get('/api/v1/companies')
+            ->assertUnauthorized()
+            ->assertJson(['message' => 'Unauthenticated.']);
+    }
+
     public function test_unknown_roles_get_no_area(): void
     {
         $this->as($this->user('made_up_role'))->getJson('/api/v1/mobile/dashboard')->assertForbidden();
