@@ -80,5 +80,11 @@ class AppServiceProvider extends ServiceProvider
             $key = strtolower((string) $request->input('email')) . '|' . $request->ip();
             return Limit::perMinute(3)->by($key);
         });
+
+        // Public "is my card active?" check: limited per IP so card numbers
+        // cannot be guessed by trying many in a row.
+        RateLimiter::for('card-check', function (Request $request) {
+            return [Limit::perMinute(10)->by($request->ip()), Limit::perDay(100)->by($request->ip())];
+        });
     }
 }

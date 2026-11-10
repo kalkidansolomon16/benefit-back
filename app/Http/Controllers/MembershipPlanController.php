@@ -26,6 +26,19 @@ class MembershipPlanController extends Controller
         return response()->json($plans);
     }
 
+    /**
+     * Public landing-page list: active plans only, in price order, without the
+     * price or any internal counts (prices are agreed with each employer).
+     */
+    public function publicIndex(): JsonResponse
+    {
+        $plans = MembershipPlan::where('is_active', true)
+            ->orderBy('monthly_fee_etb')
+            ->get(['id', 'name', 'tier', 'features', 'target_level', 'is_active']);
+
+        return response()->json($plans);
+    }
+
     public function store(Request $request): JsonResponse
     {
         $validated = $request->validate([

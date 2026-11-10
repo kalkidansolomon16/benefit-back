@@ -21,9 +21,13 @@ class MembershipController extends Controller
             ->when($request->plan_id,     fn($q) => $q->where('plan_id', $request->plan_id))
             ->when($request->gym_tier,    fn($q) => $q->whereHas('gym', fn($g) => $g->where('tier', $request->gym_tier)))
             ->when($request->company_id,  fn($q) => $q->whereHas('employee', fn($e) => $e->where('company_id', $request->company_id)))
-            ->when($request->search,      fn($q) => $q->whereHas('employee.user', fn($u) =>
-                $u->where('name', 'like', "%{$request->search}%")
-                  ->orWhere('email', 'like', "%{$request->search}%")
+            ->when($request->search,      fn($q) => $q->whereHas('employee', fn($e) => $e
+                ->where('fan_number', 'like', "%{$request->search}%")
+                ->when(strlen(preg_replace('/\D/', '', $request->search)) >= 4, fn($c) => $c
+                    ->orWhere('card_number', 'like', '%' . preg_replace('/\D/', '', $request->search) . '%'))
+                ->orWhereHas('user', fn($u) => $u
+                    ->where('name', 'like', "%{$request->search}%")
+                    ->orWhere('email', 'like', "%{$request->search}%"))
             ))
             ->latest()
             ->paginate(10);

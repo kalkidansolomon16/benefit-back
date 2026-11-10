@@ -45,7 +45,7 @@
           <td style="background:#f9fafb;padding:24px 40px;border-top:1px solid #e5e7eb;text-align:center;">
             <p style="color:#9ca3af;font-size:13px;margin:0;">
               This email was sent by FitAccess — Ethiopia's #1 Corporate Wellness Platform.<br>
-              If you have questions, contact us at support@fitaccess.com
+              If you have questions, contact us at auto@fit-access.com
             </p>
           </td>
         </tr>

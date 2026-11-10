@@ -13,10 +13,18 @@ class Employee extends Model
 {
     use SoftDeletes;
 
+    protected static function booted(): void
+    {
+        // Every employee gets a FitAccess card number when created.
+        static::creating(function (Employee $employee) {
+            $employee->card_number ??= \App\Support\CardNumber::generate();
+        });
+    }
+
     protected $fillable = [
         'user_id', 'company_id', 'company_branch_id', 'fan_number', 'photo_path',
         'job_title', 'level', 'department', 'branch',
-        'request_note', 'registration_status', 'payment_status', 'paid_period',
+        'request_note', 'registration_status', 'payment_status', 'paid_period', 'paid_until',
         'is_enrolled', 'enrolled_at',
         'admin_approval_status', 'payment_preference',
         'is_enrolled', 'enrolled_at',
@@ -33,7 +41,35 @@ class Employee extends Model
         'is_enrolled'  => 'boolean',
         'enrolled_at'  => 'datetime',
         'banned_until' => 'datetime',
+        'paid_until'   => 'date',
     ];
+
+    /** Is this employee's access paid for today (their company's invoice covers today)? */
+    public function hasPaidAccess(): bool
+    {
+        return \App\Support\BillingPeriod::covers($this->paid_until);
+    }
+
+    /** active | expired (paid period ended) | unpaid (never paid) | suspended | inactive */
+    public function accessStatus(): string
+    {
+        if (!$this->is_enrolled) {
+            return 'inactive';
+        }
+        if (!$this->hasPaidAccess()) {
+            return $this->paid_until ? 'expired' : 'unpaid';
+        }
+
+        return $this->activeMembership?->status ?? 'active';
+    }
+
+    /** Short reason shown when check-in is refused because the paid period ended */
+    public function paidAccessMessage(): string
+    {
+        return $this->paid_until
+            ? 'FitAccess access ended on ' . $this->paid_until->format('j M Y') . '. The company needs to pay its next invoice to renew it.'
+            : 'FitAccess access has not been paid for yet. It starts once the company pays its invoice.';
+    }
 
     public function getIsBannedAttribute(): bool
     {

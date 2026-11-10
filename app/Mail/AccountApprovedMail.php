@@ -29,7 +29,7 @@ class AccountApprovedMail extends Mailable
             with: [
                 'name'     => $this->user->name,
                 'email'    => $this->user->email,
-                'loginUrl' => env('FRONTEND_URL', 'http://localhost:5173') . '/login',
+                'loginUrl' => config('app.frontend_url') . '/login',
             ],
         );
     }

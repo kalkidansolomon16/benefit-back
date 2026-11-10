@@ -13,6 +13,7 @@ class BillingInvoice extends Model
 
     protected $fillable = [
         'company_id', 'company_branch_id', 'branch_scoped', 'employee_id', 'invoice_number', 'billing_period',
+        'period_months', 'period_start', 'period_end',
         'total_amount', 'due_date', 'notes', 'status',
         'sent_at', 'paid_at',
     ];
@@ -20,6 +21,9 @@ class BillingInvoice extends Model
     protected $casts = [
         'branch_scoped' => 'boolean',
         'due_date' => 'date',
+        'period_months' => 'integer',
+        'period_start'  => 'date',
+        'period_end'    => 'date',
         'sent_at'  => 'datetime',
         'paid_at'  => 'datetime',
     ];
@@ -57,6 +61,12 @@ class BillingInvoice extends Model
         return $this->hasMany(BillingInvoiceItem::class);
     }
 
+    /** The employees this invoice pays for (set when it is generated) */
+    public function coveredEmployees(): \Illuminate\Database\Eloquent\Relations\BelongsToMany
+    {
+        return $this->belongsToMany(Employee::class, 'billing_invoice_employees')->withTimestamps();
+    }
+
     public function payments(): HasMany
     {
         return $this->hasMany(BillingPayment::class);
@@ -80,6 +90,9 @@ class BillingInvoice extends Model
     /** Auto-generate invoice number on creation. */
     protected static function booted(): void
     {
+        // The covered-employee list has no database foreign key; remove it with a hard delete
+        static::forceDeleted(fn (BillingInvoice $invoice) => $invoice->coveredEmployees()->detach());
+
         static::creating(function (BillingInvoice $invoice) {
             if (empty($invoice->invoice_number)) {
                 $year  = now()->format('Y');

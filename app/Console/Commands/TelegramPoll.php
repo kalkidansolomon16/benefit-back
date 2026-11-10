@@ -12,7 +12,7 @@ use Illuminate\Support\Facades\Log;
 class TelegramPoll extends Command
 {
     protected $signature   = 'telegram:poll';
-    protected $description = 'Poll Telegram for updates (local development only)';
+    protected $description = 'Poll Telegram for updates (local development only — removes the live webhook; never run it with the production bot token)';
 
     public function handle(TelegramService $telegram): void
     {

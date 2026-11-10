@@ -14,3 +14,6 @@ Schedule::call(fn () => app(QrTokenService::class)->prune())->daily();
 
 // Delete API session tokens that expired more than a day ago.
 Schedule::command('sanctum:prune-expired --hours=24')->daily();
+
+// Billing: mark access whose paid period ended, and remind companies before it ends.
+Schedule::command('billing:coverage')->dailyAt('06:00');

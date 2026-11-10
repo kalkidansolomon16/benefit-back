@@ -23,12 +23,17 @@ class PartnerApplicationController extends Controller
             ->get()
             ->map(fn($a) => [
                 'id'                     => $a->id,
+                'reference'              => $a->reference,
                 'facility_name'          => $a->facility_name,
                 'categories'             => $a->categories,
                 'contact_person'         => $a->contact_person,
                 'contact_phone'          => $a->contact_phone,
                 'contact_email'          => $a->contact_email,
                 'tin_number'             => $a->tin_number,
+                'website'                => $a->website,
+                'has_permits'            => $a->has_permits,
+                'has_certified_equipment'=> $a->has_certified_equipment,
+                'has_reception'          => $a->has_reception,
                 'business_license_url'   => $a->business_license_path
                     ? url('/api/v1/files/' . ltrim($a->business_license_path, '/'))
                     : null,
@@ -37,6 +42,8 @@ class PartnerApplicationController extends Controller
                 'woreda'                 => $a->woreda,
                 'landmark'               => $a->landmark,
                 'google_maps_link'       => $a->google_maps_link,
+                'latitude'               => $a->latitude,
+                'longitude'              => $a->longitude,
                 'operating_hours_summary'=> $a->operating_hours_summary,
                 'weekday_open'           => $a->weekday_open,
                 'weekday_close'          => $a->weekday_close,
@@ -91,11 +98,46 @@ class PartnerApplicationController extends Controller
             return response()->json(['message' => 'The main gym for this branch no longer exists.'], 422);
         }
 
-        $created = [];
+        // Public applications have no logins yet: they are created now with a
+        // temporary password. Make sure nobody took those emails in the meantime.
+        $newEmails = array_column(array_filter($branches, fn($b) => empty($b['user_id'])), 'email');
+        if (!$isBranchRequest && !$partnerApplication->user_id) {
+            $newEmails[] = $partnerApplication->contact_email;
+        }
+        $taken = $newEmails ? User::whereIn('email', $newEmails)->pluck('email')->all() : [];
+        if ($taken) {
+            throw \Illuminate\Validation\ValidationException::withMessages([
+                'email' => 'These email addresses are already registered: ' . implode(', ', $taken)
+                         . '. Reject this application or ask the applicant to use a different email.',
+            ]);
+        }
 
-        DB::transaction(function () use ($request, $partnerApplication, $branches, $isBranchRequest, &$created) {
+        $created = [];
+        /** @var array<int, array{name:string,email:string,password:string,label:string}> $logins */
+        $logins  = [];
+
+        DB::transaction(function () use ($request, $partnerApplication, $branches, $isBranchRequest, &$created, &$logins) {
             $app   = $partnerApplication;
             $owner = $app->user;
+
+            // Owner login for a public application (temporary password, changed at first sign-in)
+            $ownerIsNew = false;
+            if (!$isBranchRequest && !$owner) {
+                $password = CompanyApplicationController::tempPassword();
+                $owner = User::create([
+                    'name'                => $app->contact_person,
+                    'email'               => $app->contact_email,
+                    'password'            => \Illuminate\Support\Facades\Hash::make($password),
+                    'role'                => 'gym_partner',
+                    'phone'               => $app->contact_phone,
+                    'is_active'           => true,
+                    'must_reset_password' => true,
+                ]);
+                $app->update(['user_id' => $owner->id]);
+                $ownerIsNew = true;
+                $logins[] = ['name' => $owner->name, 'email' => $owner->email, 'password' => $password,
+                             'label' => $app->facility_name];
+            }
 
             // Main location (or the single new branch, for a portal branch request)
             $main = $this->createGym($app, [
@@ -110,21 +152,42 @@ class PartnerApplicationController extends Controller
                 'weekend_open'  => $app->weekend_open,
                 'weekend_close' => $app->weekend_close,
                 'max_capacity'  => $app->max_capacity,
+                'latitude'      => $app->latitude,
+                'longitude'     => $app->longitude,
             ], $request->tier, $owner?->id, $isBranchRequest ? $app->parent_gym_id : null,
                $isBranchRequest ? $app->branchUser : null);
             $created[] = $main;
             if ($isBranchRequest) {
                 $this->linkBranchLogin($app->branchUser, $main);
             } else {
-                $this->makeGymAdmin($owner, $main);
+                $this->makeGymAdmin($owner, $main, $ownerIsNew);
             }
 
-            // Extra branches submitted at registration — each has its own login
+            // Extra branches submitted with the application — each gets its own login
+            $storedBranches = $branches;
             foreach ($branches as $i => $branch) {
                 $login = !empty($branch['user_id']) ? User::find($branch['user_id']) : null;
-                $gym   = $this->createGym($app, $branch, $request->input("branch_tiers.$i"), $owner?->id, $main->id, $login);
-                $this->linkBranchLogin($login, $gym);
+                $loginIsNew = false;
+                if (!$login && !empty($branch['email'])) {
+                    $password = CompanyApplicationController::tempPassword();
+                    $login = \App\Services\BranchLoginService::createLogin(
+                        array_merge($branch, ['password' => $password]),
+                        'gym_partner',
+                        ['must_reset_password' => true]
+                    );
+                    $storedBranches[$i]['user_id'] = $login->id;
+                    $loginIsNew = true;
+                }
+                $gym = $this->createGym($app, $branch, $request->input("branch_tiers.$i"), $owner?->id, $main->id, $login);
+                $this->linkBranchLogin($login, $gym, $loginIsNew);
                 $created[] = $gym;
+                if ($loginIsNew) {
+                    $logins[] = ['name' => $login->name, 'email' => $login->email, 'password' => $password,
+                                 'label' => $gym->name];
+                }
+            }
+            if ($storedBranches !== $branches) {
+                $app->update(['branches' => $storedBranches]);
             }
 
             $app->update(['status' => 'approved']);
@@ -134,6 +197,16 @@ class PartnerApplicationController extends Controller
         });
 
         // Send notifications AFTER transaction so DB changes are committed
+        $credentials = array_map(fn($l) => [
+            'name'          => $l['name'],
+            'email'         => $l['email'],
+            'temp_password' => $l['password'],
+            'label'         => $l['label'],
+            'emailed'       => \App\Services\ApplicationMailer::credentials(
+                \App\Services\ApplicationMailer::PARTNER, $l['name'], $l['email'], $l['password'], $l['label']),
+        ], $logins);
+        $ownerGotCredentials = in_array($partnerApplication->contact_email, array_column($logins, 'email'), true);
+
         $partnerUser = $partnerApplication->user()->first();
         if ($partnerUser) {
             if ($isBranchRequest) {
@@ -152,11 +225,14 @@ class PartnerApplicationController extends Controller
                     \Illuminate\Support\Facades\Log::error('Branch approval email failed: ' . $e->getMessage());
                 }
             } else {
-                try {
-                    \Illuminate\Support\Facades\Mail::to($partnerUser->email)
-                        ->send(new \App\Mail\AccountApprovedMail($partnerUser));
-                } catch (\Throwable $e) {
-                    \Illuminate\Support\Facades\Log::error('Partner approval email failed: ' . $e->getMessage());
+                // Older applications chose their password at sign-up: just tell them they're approved
+                if (!$ownerGotCredentials) {
+                    try {
+                        \Illuminate\Support\Facades\Mail::to($partnerUser->email)
+                            ->send(new \App\Mail\AccountApprovedMail($partnerUser));
+                    } catch (\Throwable $e) {
+                        \Illuminate\Support\Facades\Log::error('Partner approval email failed: ' . $e->getMessage());
+                    }
                 }
                 try {
                     app(TelegramService::class)->notifyUserApproved($partnerUser, 'partner');
@@ -171,9 +247,11 @@ class PartnerApplicationController extends Controller
             : "Approved. Gym \"{$created[0]->name}\" is now live.";
 
         return response()->json([
-            'message' => $message,
-            'gym_id'  => $created[0]->id,
-            'gym_ids' => array_map(fn($g) => $g->id, $created),
+            'message'     => $message . ($credentials ? ' Login details were sent by email.' : ''),
+            'gym_id'      => $created[0]->id,
+            'gym_ids'     => array_map(fn($g) => $g->id, $created),
+            // Shown to the admin once, in case an email does not arrive
+            'credentials' => $credentials,
         ]);
     }
 
@@ -209,6 +287,8 @@ class PartnerApplicationController extends Controller
             'address'           => $address,
             'sub_city'          => $loc['sub_city'] ?? null,
             'city'              => $loc['city'],
+            'latitude'          => isset($loc['latitude']) ? (float) $loc['latitude'] : null,
+            'longitude'         => isset($loc['longitude']) ? (float) $loc['longitude'] : null,
             'tier'              => self::canonicalTier($tier),
             'max_capacity'      => (int) $loc['max_capacity'],
             'facilities'        => array_merge($app->categories ?? [], $app->amenities ?? []),
@@ -220,24 +300,24 @@ class PartnerApplicationController extends Controller
     }
 
     /** Pin a branch login to its gym, let it sign in, and make it that gym's admin */
-    private function linkBranchLogin(?User $login, Gym $gym): void
+    private function linkBranchLogin(?User $login, Gym $gym, bool $mustChangePassword = false): void
     {
         $login?->forceFill(['gym_id' => $gym->id, 'is_active' => true])->save();
-        $this->makeGymAdmin($login, $gym);
+        $this->makeGymAdmin($login, $gym, $mustChangePassword);
     }
 
     /**
      * The mobile app reads the gym_staff table to know which gym a login belongs to
      * and what it may do, so every gym's owner / branch login gets an "admin" row.
-     * They chose their own password at registration, so no forced change.
+     * Logins created on approval have a temporary password and must change it.
      */
-    private function makeGymAdmin(?User $user, Gym $gym): void
+    private function makeGymAdmin(?User $user, Gym $gym, bool $mustChangePassword = false): void
     {
         if (!$user) return;
 
         GymStaff::updateOrCreate(
             ['user_id' => $user->id, 'gym_id' => $gym->id],
-            ['role' => 'admin', 'is_active' => true, 'must_change_password' => false]
+            ['role' => 'admin', 'is_active' => true, 'must_change_password' => $mustChangePassword]
         );
     }
 
@@ -286,6 +366,8 @@ class PartnerApplicationController extends Controller
                 'address'      => $g->address,
                 'sub_city'     => $g->sub_city,
                 'city'         => $g->city,
+                'latitude'     => $g->latitude !== null ? (float) $g->latitude : null,
+                'longitude'    => $g->longitude !== null ? (float) $g->longitude : null,
                 'tier'         => $g->tier,
                 'max_capacity' => $g->max_capacity,
                 'is_active'    => $g->is_active,
@@ -373,6 +455,8 @@ class PartnerApplicationController extends Controller
             'woreda'                => $branch['woreda'],
             'landmark'              => $branch['landmark'],
             'google_maps_link'      => $branch['google_maps_link'],
+            'latitude'              => $branch['latitude'],
+            'longitude'             => $branch['longitude'],
             'weekday_open'          => $branch['weekday_open'],
             'weekday_close'         => $branch['weekday_close'],
             'weekend_open'          => $branch['weekend_open'],
@@ -442,6 +526,20 @@ class PartnerApplicationController extends Controller
         }
 
         $partnerApplication->user?->update(['is_active' => false]);
+
+        // Public applications have no login yet: tell the applicant at their contact email
+        if (!$partnerApplication->user) {
+            \App\Services\ApplicationMailer::rejected(
+                \App\Services\ApplicationMailer::PARTNER,
+                $partnerApplication->contact_person,
+                $partnerApplication->contact_email,
+                $partnerApplication->reference ?? ('#' . $partnerApplication->id),
+                $partnerApplication->facility_name,
+                $request->reason
+            );
+
+            return response()->json(['message' => 'Application rejected. The applicant has been informed by email.']);
+        }
 
         try {
             if ($partnerApplication->user) {

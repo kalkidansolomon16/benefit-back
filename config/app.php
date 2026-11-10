@@ -54,6 +54,9 @@ return [
 
     'url' => env('APP_URL', 'http://localhost'),
 
+    // Public web app, used for links in emails (login page, admin review pages)
+    'frontend_url' => rtrim(env('FRONTEND_URL', 'http://localhost:5173'), '/'),
+
     /*
     |--------------------------------------------------------------------------
     | Application Timezone

@@ -8,7 +8,7 @@ use OpenApi\Attributes as OA;
     title: 'FitAccess API',
     version: '1.0.0',
     description: 'FitAccess Employee Benefit Management System API',
-    contact: new OA\Contact(email: 'admin@fitaccess.com')
+    contact: new OA\Contact(email: 'auto@fit-access.com')
 )]
 #[OA\Server(
     url: L5_SWAGGER_CONST_HOST,

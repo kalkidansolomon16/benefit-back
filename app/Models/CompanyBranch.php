@@ -18,11 +18,13 @@ class CompanyBranch extends Model
 
     protected $fillable = [
         'company_id', 'name', 'contact_person', 'city', 'sub_city',
-        'address', 'landmark', 'phone', 'is_active',
+        'address', 'landmark', 'latitude', 'longitude', 'phone', 'is_active',
     ];
 
     protected $casts = [
         'is_active' => 'boolean',
+        'latitude'  => 'float',
+        'longitude' => 'float',
     ];
 
     public function company(): BelongsTo

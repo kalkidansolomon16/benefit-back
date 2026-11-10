@@ -134,7 +134,8 @@ Route::prefix('v1')->group(function () {
     Route::post('auth/register/partner',   [AuthController::class, 'registerPartner'])->middleware('throttle:register');
     Route::get('public/companies',         [CompanyController::class, 'publicList']);
     Route::get('public/companies/{company}/branches', [CompanyController::class, 'publicBranches']);
-    Route::get('public/plans',             [MembershipPlanController::class, 'index']);
+    Route::post('public/card-status',      [\App\Http\Controllers\CardStatusController::class, 'check'])->middleware('throttle:card-check');
+    Route::get('public/plans',             [MembershipPlanController::class, 'publicIndex']);
 
     // ── Protected ───────────────────────────────────────────────────
     Route::middleware('auth:sanctum')->group(function () {
@@ -311,14 +312,22 @@ Route::prefix('v1')->group(function () {
         Route::delete('gyms/{gym}/roles/{role}',         [RolesController::class, 'adminGymDestroy']);
 
         // Companies
-        Route::post('companies/admin-create', [CompanyController::class, 'adminCreate']);
+        Route::post('companies/admin-create', [CompanyController::class, 'adminCreate'])->middleware('permission:companies.create');
+
+        // Employer applications from the public form (no account exists until approved)
+        Route::get('company-applications', [\App\Http\Controllers\CompanyApplicationController::class, 'index'])
+            ->middleware('permission:companies.view');
+        Route::post('company-applications/{companyApplication}/approve', [\App\Http\Controllers\CompanyApplicationController::class, 'approve'])
+            ->middleware('permission:companies.create');
+        Route::post('company-applications/{companyApplication}/reject', [\App\Http\Controllers\CompanyApplicationController::class, 'reject'])
+            ->middleware('permission:companies.create');
         Route::apiResource('companies', CompanyController::class);
         Route::patch('companies/{company}/toggle-active',      [CompanyController::class, 'toggleActive']);
         Route::post('companies/{company}/reset-2fa',           [AdminUserController::class, 'resetCompanyTwoFactor']);
         Route::get('companies/{company}/branches',             [AdminUserController::class, 'companyBranches']);
         Route::post('companies/{company}/branches/{branch}/reset-2fa', [AdminUserController::class, 'resetCompanyBranchTwoFactor']);
         Route::patch('companies/{company}/license-status',     [CompanyController::class, 'updateLicenseStatus']);
-        Route::post('companies/{company}/deactivate',          [AdminBillingController::class, 'deactivateCompany']);
+        Route::post('companies/{company}/deactivate',          [AdminBillingController::class, 'deactivateCompany'])->middleware('permission:companies.edit');
 
         // Employees
         Route::get( 'employees/pending-admin-approval',    [EmployeeController::class, 'pendingAdminApproval']);
@@ -339,10 +348,13 @@ Route::prefix('v1')->group(function () {
         Route::post('gyms/{gym}/reset-2fa',                     [AdminUserController::class, 'resetGymTwoFactor']);
 
         // Partner Applications
-        Route::get('partner-applications',                              [PartnerApplicationController::class, 'index']);
-        Route::post('partner-applications/{partnerApplication}/approve', [PartnerApplicationController::class, 'approve']);
-        Route::post('partner-applications/{partnerApplication}/approve',[PartnerApplicationController::class, 'approve']);
-        Route::post('partner-applications/{partnerApplication}/reject', [PartnerApplicationController::class, 'reject']);
+        // Partner applications: approving creates gyms and logins, so admin permissions are required
+        Route::get('partner-applications',                              [PartnerApplicationController::class, 'index'])
+            ->middleware('permission:gyms.view');
+        Route::post('partner-applications/{partnerApplication}/approve', [PartnerApplicationController::class, 'approve'])
+            ->middleware('permission:gyms.create');
+        Route::post('partner-applications/{partnerApplication}/reject', [PartnerApplicationController::class, 'reject'])
+            ->middleware('permission:gyms.create');
 
         // Membership Plans
         Route::apiResource('membership-plans', MembershipPlanController::class);
@@ -428,6 +440,8 @@ Route::prefix('v1')->group(function () {
             Route::get('billing/invoices',                                      [CompanyBillingController::class, 'index']);
             Route::get('billing/invoices/{billingInvoice}',                     [CompanyBillingController::class, 'show']);
             Route::get('billing/payment-methods',                               [CompanyBillingController::class, 'paymentMethods']);
+            Route::get('billing/coverage',                                      [CompanyBillingController::class, 'coverage']);
+            Route::put('billing/preference',                                    [CompanyBillingController::class, 'updatePreference']);
             Route::post('billing/invoices/{billingInvoice}/pay',                [CompanyBillingController::class, 'submitPayment']);
             Route::post('billing/invoices/{billingInvoice}/negotiate',          [CompanyBillingController::class, 'submitNegotiation']);
             Route::post('billing/invoices/{billingInvoice}/chapa/initialize',   [ChapaController::class, 'initialize']);
@@ -437,28 +451,29 @@ Route::prefix('v1')->group(function () {
         // ── Admin billing ──────────────────────────────────────────
         Route::prefix('admin/billing')->group(function () {
             // Invoices
-            Route::get('invoices',                                      [AdminBillingController::class, 'index']);
-            Route::post('invoices/generate',                            [AdminBillingController::class, 'generate']);
-            Route::get('invoices/{billingInvoice}',                     [AdminBillingController::class, 'show']);
-            Route::post('invoices/{billingInvoice}/send',               [AdminBillingController::class, 'send']);
-            Route::delete('invoices/{billingInvoice}',                  [AdminBillingController::class, 'destroy']);
+            Route::get('invoices',                                      [AdminBillingController::class, 'index'])->middleware('permission:billing.view');
+            Route::post('invoices/preview',                             [AdminBillingController::class, 'preview'])->middleware('permission:billing.create');
+            Route::post('invoices/generate',                            [AdminBillingController::class, 'generate'])->middleware('permission:billing.create');
+            Route::get('invoices/{billingInvoice}',                     [AdminBillingController::class, 'show'])->middleware('permission:billing.view');
+            Route::post('invoices/{billingInvoice}/send',               [AdminBillingController::class, 'send'])->middleware('permission:billing.send');
+            Route::delete('invoices/{billingInvoice}',                  [AdminBillingController::class, 'destroy'])->middleware('permission:billing.delete');
 
             // Payments / receipts
-            Route::get('pending-payments',                              [AdminBillingController::class, 'pendingPayments']);
-            Route::post('payments/{billingPayment}/verify',             [AdminBillingController::class, 'verifyPayment']);
-            Route::post('payments/{billingPayment}/reject',             [AdminBillingController::class, 'rejectPayment']);
+            Route::get('pending-payments',                              [AdminBillingController::class, 'pendingPayments'])->middleware('permission:billing.view');
+            Route::post('payments/{billingPayment}/verify',             [AdminBillingController::class, 'verifyPayment'])->middleware('permission:payments.verify');
+            Route::post('payments/{billingPayment}/reject',             [AdminBillingController::class, 'rejectPayment'])->middleware('permission:payments.reject');
 
             // Negotiations
-            Route::get('negotiations',                                          [AdminBillingController::class, 'pendingNegotiations']);
-            Route::post('negotiations/{billingNegotiation}/approve',            [AdminBillingController::class, 'approveNegotiation']);
-            Route::post('negotiations/{billingNegotiation}/reject',             [AdminBillingController::class, 'rejectNegotiation']);
+            Route::get('negotiations',                                          [AdminBillingController::class, 'pendingNegotiations'])->middleware('permission:billing.view');
+            Route::post('negotiations/{billingNegotiation}/approve',            [AdminBillingController::class, 'approveNegotiation'])->middleware('permission:negotiations.approve');
+            Route::post('negotiations/{billingNegotiation}/reject',             [AdminBillingController::class, 'rejectNegotiation'])->middleware('permission:negotiations.reject');
 
             // Payment methods management
-            Route::get('payment-methods',                               [AdminPaymentMethodController::class, 'index']);
-            Route::post('payment-methods',                              [AdminPaymentMethodController::class, 'store']);
-            Route::put('payment-methods/{paymentMethod}',               [AdminPaymentMethodController::class, 'update']);
-            Route::delete('payment-methods/{paymentMethod}',            [AdminPaymentMethodController::class, 'destroy']);
-            Route::patch('payment-methods/{paymentMethod}/toggle',      [AdminPaymentMethodController::class, 'toggleActive']);
+            Route::get('payment-methods',                               [AdminPaymentMethodController::class, 'index'])->middleware('permission:payment_methods.view');
+            Route::post('payment-methods',                              [AdminPaymentMethodController::class, 'store'])->middleware('permission:payment_methods.create');
+            Route::put('payment-methods/{paymentMethod}',               [AdminPaymentMethodController::class, 'update'])->middleware('permission:payment_methods.edit');
+            Route::delete('payment-methods/{paymentMethod}',            [AdminPaymentMethodController::class, 'destroy'])->middleware('permission:payment_methods.delete');
+            Route::patch('payment-methods/{paymentMethod}/toggle',      [AdminPaymentMethodController::class, 'toggleActive'])->middleware('permission:payment_methods.toggle');
         });
 
         // ── Admin gym upgrade requests ─────────────────────────────

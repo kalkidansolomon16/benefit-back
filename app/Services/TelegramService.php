@@ -154,6 +154,24 @@ class TelegramService
         }
     }
 
+    /** A company applied from the public form; nothing exists until an admin approves it. */
+    public function notifyAdminsNewCompanyApplication(\App\Models\CompanyApplication $app): void
+    {
+        $admins = User::whereIn('role', ['super_admin', 'fitaccess_admin'])
+            ->whereNotNull('telegram_chat_id')->get();
+
+        $text = "🏢 <b>New Employer Application</b> ({$app->reference})\n\n"
+              . "<b>Company:</b> {$app->company_name}\n"
+              . "<b>Contact:</b> {$app->contact_name}\n"
+              . "<b>Email:</b> {$app->contact_email}\n"
+              . "<b>TIN:</b> {$app->tin_number}\n\n"
+              . "⏳ Review and approve it in the admin portal (Company Applications).";
+
+        foreach ($admins as $admin) {
+            $this->sendMessage($admin->telegram_chat_id, $text);
+        }
+    }
+
     public function notifyAdminsNewPartner(PartnerApplication $app): void
     {
         $admins = User::whereIn('role', ['super_admin', 'fitaccess_admin'])

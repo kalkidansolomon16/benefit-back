@@ -18,12 +18,14 @@ class Company extends Model
         'logo_path', 'tin_number', 'is_active', 'contract_start', 'contract_end',
         'business_license_path', 'business_license_status',
         'preferred_payment_method', 'company_status', 'suspension_reason',
+        'billing_cycle_months',
     ];
 
     protected $casts = [
         'is_active'      => 'boolean',
         'contract_start' => 'date',
         'contract_end'   => 'date',
+        'billing_cycle_months' => 'integer',
     ];
 
     public function branches(): HasMany

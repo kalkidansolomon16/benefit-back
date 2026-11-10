@@ -91,6 +91,8 @@ class PartnerPortalController extends Controller
                 'city'           => $gym->city,
                 'sub_city'       => $gym->sub_city,
                 'address'        => $gym->address,
+                'latitude'       => $gym->latitude !== null ? (float) $gym->latitude : null,
+                'longitude'      => $gym->longitude !== null ? (float) $gym->longitude : null,
                 'contact_person' => $gym->contact_person,
                 'contact_phone'  => $gym->contact_phone,
                 'contact_email'  => $gym->contact_email,

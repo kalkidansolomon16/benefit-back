@@ -200,6 +200,13 @@ class PartnerMobileController extends Controller
             $planTier   = $empMembership->tier;
             $planName   = $empMembership->name;
             $employeeId = $empMembership->employee_id;
+
+            // Company employees: only while their company's invoice covers today
+            $emp = \App\Models\Employee::find($employeeId);
+            if (!$emp || !$emp->hasPaidAccess()) {
+                return $this->rejectScan($request, $gym, 'not_paid',
+                    $emp ? $emp->paidAccessMessage() : 'No active FitAccess membership.', $member->id);
+            }
         }
 
         // ── 4. Tier access check ──────────────────────────────────────────────

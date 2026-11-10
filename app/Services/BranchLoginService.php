@@ -23,8 +23,10 @@ class BranchLoginService
      * Validate a list of branch entries and return only the known fields.
      *
      * @param  string[]  $reservedEmails  emails a branch login may not reuse (e.g. the main account's)
+     * @param  bool      $withPassword    false for public applications: the login (and a temporary
+     *                                    password) is only created once an admin approves
      */
-    public static function validate(mixed $branches, string $kind, array $reservedEmails = []): array
+    public static function validate(mixed $branches, string $kind, array $reservedEmails = [], bool $withPassword = true): array
     {
         if (!is_array($branches)) {
             $branches = [];
@@ -42,6 +44,9 @@ class BranchLoginService
             'branches.*.woreda'           => 'required|string|max:255',
             'branches.*.landmark'         => 'nullable|string|max:255',
             'branches.*.contact_phone'    => 'nullable|string|max:20',
+            // Pin picked on the map (optional; both or neither)
+            'branches.*.latitude'         => 'nullable|numeric|between:-90,90|required_with:branches.*.longitude',
+            'branches.*.longitude'        => 'nullable|numeric|between:-180,180|required_with:branches.*.latitude',
         ];
         $messages = [
             'branches.*.branch_name.required'    => 'Each branch needs a name.',
@@ -54,7 +59,12 @@ class BranchLoginService
             'branches.*.woreda.required'         => 'Each branch needs an address.',
         ];
         $fields = ['branch_name', 'contact_person', 'email', 'password', 'city', 'sub_city',
-                   'woreda', 'landmark', 'contact_phone'];
+                   'woreda', 'landmark', 'contact_phone', 'latitude', 'longitude'];
+
+        if (!$withPassword) {
+            unset($rules['branches.*.password'], $messages['branches.*.password.required']);
+            $fields = array_values(array_diff($fields, ['password']));
+        }
 
         if ($kind === self::GYM) {
             $rules += [

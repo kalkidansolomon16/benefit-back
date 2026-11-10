@@ -39,6 +39,11 @@ class CheckinController extends Controller
             ], 403);
         }
 
+        // Access only while the company's invoice covers today
+        if (!$employee->hasPaidAccess()) {
+            return response()->json(['message' => $employee->paidAccessMessage(), 'reason' => 'not_paid'], 403);
+        }
+
         $existing = Checkin::where('employee_id', $employee->id)
             ->whereDate('checked_in_at', now()->toDateString())
             ->first();
@@ -170,6 +175,10 @@ class CheckinController extends Controller
 
         $employee = Employee::where('user_id', auth()->id())->firstOrFail();
 
+        if (!$employee->hasPaidAccess()) {
+            return response()->json(['message' => $employee->paidAccessMessage(), 'reason' => 'not_paid'], 403);
+        }
+
         $tier    = self::employeeTier($employee);
         $allowed = self::allowedTiers($tier);
 
@@ -225,6 +234,16 @@ class CheckinController extends Controller
     public function token(): JsonResponse
     {
         $employee = Employee::where('user_id', auth()->id())->firstOrFail();
+
+        if (!$employee->hasPaidAccess()) {
+            return response()->json([
+                'needs_selection' => false,
+                'access_ended'    => true,
+                'paid_until'      => $employee->paid_until?->toDateString(),
+                'message'         => $employee->paidAccessMessage(),
+                'gyms'            => [],
+            ]);
+        }
 
         $tier    = self::employeeTier($employee);
         $allowed = self::allowedTiers($tier);
@@ -380,6 +399,11 @@ class CheckinController extends Controller
             ], 403);
         }
 
+        // Access only while the company's invoice covers today
+        if (!$employee->hasPaidAccess()) {
+            return response()->json(['message' => $employee->paidAccessMessage(), 'reason' => 'not_paid'], 403);
+        }
+
         // Daily access already used?
         $existing = Checkin::where('employee_id', $employee->id)
             ->whereDate('checked_in_at', now()->toDateString())
@@ -439,16 +463,13 @@ class CheckinController extends Controller
 
     private static function employeeTier(Employee $e): string
     {
-        return match($e->level) {
-            'chief'    => 'platinum',
-            'director' => 'basic_plus',
-            default    => 'basic',
-        };
+        return \App\Support\Tier::forLevel($e->level);
     }
 
     private static function allowedTiers(string $tier): array
     {
-        return [$tier];
+        // Higher packages include the lower ones' gyms
+        return \App\Support\Tier::gymTiersFor($tier);
     }
 
     // ── Find or auto-create membership ────────────────────────────
@@ -465,7 +486,7 @@ class CheckinController extends Controller
                 'plan_id'    => $plan?->id,
                 'status'     => 'active',
                 'start_date' => now()->toDateString(),
-                'end_date'   => now()->addYear()->toDateString(),
+                'end_date'   => ($employee->paid_until ?? now())->toDateString(),
             ]
         );
 

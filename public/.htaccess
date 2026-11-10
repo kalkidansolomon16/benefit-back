@@ -2,15 +2,20 @@
     Header always set X-Frame-Options "DENY"
     Header always set X-Content-Type-Options "nosniff"
     Header always set Referrer-Policy "strict-origin-when-cross-origin"
-    Header always set Permissions-Policy "camera=(), microphone=(), geolocation=(), payment=()"
+    # geolocation=(self): the location picker's "Use my current location" (own pages only)
+    Header always set Permissions-Policy "camera=(), microphone=(), geolocation=(self), payment=()"
     Header always set Cross-Origin-Opener-Policy "same-origin"
     Header always set Cross-Origin-Resource-Policy "same-site"
-    Header always set Content-Security-Policy "default-src 'self'; script-src 'self' https://www.google.com https://www.gstatic.com; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self' data:; connect-src 'self' https://www.google.com; frame-src https://www.google.com; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'"
+    # Map: tiles from tile.openstreetmap.org, place search / address lookup from nominatim.openstreetmap.org
+    Header always set Content-Security-Policy "default-src 'self'; script-src 'self' https://www.google.com https://www.gstatic.com; style-src 'self' 'unsafe-inline'; img-src 'self' data: https://tile.openstreetmap.org; font-src 'self' data:; connect-src 'self' https://www.google.com https://nominatim.openstreetmap.org; frame-src https://www.google.com; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'"
 
     # HSTS only makes sense over HTTPS — harmless to send but only takes
     # effect in browsers once the site is actually reached over TLS.
     Header always set Strict-Transport-Security "max-age=31536000; includeSubDomains" env=HTTPS
 </IfModule>
+
+# The Vue app is the home page; Laravel (index.php) only handles /api and /sanctum
+DirectoryIndex index.html index.php
 
 <IfModule mod_rewrite.c>
     <IfModule mod_negotiation.c>
@@ -18,6 +23,9 @@
     </IfModule>
 
     RewriteEngine On
+
+    # Home page -> Vue SPA (before the "real directory" rule below, which matches "/")
+    RewriteRule ^$ index.html [L]
 
     # Handle Authorization header (needed for Sanctum on shared hosting)
     RewriteCond %{HTTP:Authorization} .

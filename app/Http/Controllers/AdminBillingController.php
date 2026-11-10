@@ -11,9 +11,12 @@ use App\Models\Employee;
 use App\Models\MembershipPlan;
 use App\Models\User;
 use App\Services\MembershipService;
+use App\Services\BillingMailer;
 use App\Services\TelegramService;
+use App\Support\BillingPeriod;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
+use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Storage;
 
@@ -25,12 +28,7 @@ class AdminBillingController extends Controller
     /** Map employee level to its canonical tier key. */
     private function levelToTier(string $level): string
     {
-        return match ($level) {
-            'chief'    => 'platinum',
-            'director' => 'basic_plus',
-            'manager'  => 'basic_plus',
-            default    => 'basic',
-        };
+        return \App\Support\Tier::forLevel($level);
     }
 
     /**
@@ -68,11 +66,21 @@ class AdminBillingController extends Controller
 
     /* ── Generate invoice for a company ──────────────────────── */
 
-    public function generate(Request $request): JsonResponse
+    /**
+     * Work out what an invoice would contain, without saving anything.
+     *
+     * Employees are billed when they are approved, enrolled and not yet covered
+     * on the period's start day (paid_until is empty or before it). Employees
+     * already on another unpaid invoice are left out so nobody is billed twice.
+     *
+     * @return array|JsonResponse
+     */
+    private function planInvoice(Request $request)
     {
         $request->validate([
             'company_id'     => 'required|exists:companies,id',
-            'billing_period' => 'required|string|max:30',
+            'period_months'  => 'nullable|integer|in:' . implode(',', BillingPeriod::CYCLES),
+            'period_start'   => 'nullable|date',
             'due_date'       => 'nullable|date',
             'notes'          => 'nullable|string|max:1000',
             'employee_id'    => 'nullable|exists:employees,id',
@@ -82,85 +90,150 @@ class AdminBillingController extends Controller
 
         $company   = Company::findOrFail($request->company_id);
         $singleEmp = $request->filled('employee_id');
+        $branch    = $request->filled('branch') ? (string) $request->branch : null;
 
-        // Build employee query
-        $empQuery = Employee::where('company_id', $company->id)
-            ->where('registration_status', 'approved')
-            ->where('is_enrolled', true)
-            ->where('payment_status', '!=', 'paid');
-
-        if ($request->filled('branch')) {
-            $branchParam = (string) $request->branch;
-            if ($branchParam === 'main') {
-                $empQuery->whereNull('company_branch_id');
-            } elseif (ctype_digit($branchParam) && $company->branches()->whereKey((int) $branchParam)->exists()) {
-                $empQuery->where('company_branch_id', (int) $branchParam);
-            } else {
-                return response()->json(['message' => 'That branch does not belong to this company.'], 422);
-            }
+        if ($branch !== null && $branch !== 'main'
+            && !(ctype_digit($branch) && $company->branches()->whereKey((int) $branch)->exists())) {
+            return response()->json(['message' => 'That branch does not belong to this company.'], 422);
         }
 
+        $preferred = in_array((int) $company->billing_cycle_months, BillingPeriod::CYCLES, true)
+            ? (int) $company->billing_cycle_months : 1;
+        $months = $request->filled('period_months') ? (int) $request->period_months : $preferred;
+        $start  = $request->filled('period_start')
+            ? Carbon::parse($request->period_start)->startOfDay()
+            : BillingPeriod::suggestedStart($company->id, $singleEmp ? null : $branch);
+        $end    = BillingPeriod::endFor($start, $months);
+
+        $empQuery = Employee::where('company_id', $company->id)
+            ->where('registration_status', 'approved')
+            ->where('is_enrolled', true);
+
+        if ($branch === 'main') {
+            $empQuery->whereNull('company_branch_id');
+        } elseif ($branch !== null) {
+            $empQuery->where('company_branch_id', (int) $branch);
+        }
         if ($singleEmp) {
             // Pay Now flow: invoice for one specific employee only
             $empQuery->where('id', $request->employee_id);
-        } else {
-            // Batch flow: only bill employees not yet paid for THIS billing period.
-            // paid_period (not the sticky payment_status flag) tracks which period an
-            // employee was last settled for, so billing re-arms every new cycle.
-            $empQuery->where(function ($q) use ($request) {
-                $q->whereNull('paid_period')
-                  ->orWhere('paid_period', '!=', $request->billing_period);
-            });
         }
 
-        $employees = $empQuery->with('activeMembership.plan')->get();
+        $candidates = $empQuery->with('activeMembership.plan')->get();
 
-        if ($employees->isEmpty()) {
-            $msg = $singleEmp
-                ? 'Employee not found or not eligible for invoicing.'
-                : 'This company has no enrolled employees still unpaid for this billing period.';
-            return response()->json(['message' => $msg], 422);
-        }
+        // Already paid for the start day → not billed again
+        $alreadyCovered = $candidates->filter(fn($e) => $e->paid_until && $e->paid_until->gte($start))->count();
+        $candidates     = $candidates->reject(fn($e) => $e->paid_until && $e->paid_until->gte($start));
+
+        // Already on an invoice that is still waiting for payment → not billed twice
+        $onOpenInvoice = DB::table('billing_invoice_employees')
+            ->join('billing_invoices', 'billing_invoices.id', '=', 'billing_invoice_employees.billing_invoice_id')
+            ->whereNull('billing_invoices.deleted_at')
+            ->whereIn('billing_invoices.status', ['draft', 'sent', 'overdue'])
+            ->whereIn('billing_invoice_employees.employee_id', $candidates->pluck('id'))
+            ->pluck('billing_invoice_employees.employee_id')
+            ->unique();
+        $alreadyInvoiced = $onOpenInvoice->count();
+        $employees = $candidates->reject(fn($e) => $onOpenInvoice->contains($e->id))->values();
 
         $hasBranches = $company->branches()->exists();
+        $branchNames = $hasBranches ? $company->branches()->pluck('name', 'id') : collect();
 
         // A company with branches is billed per branch: one invoice for each branch
         // (the head office counts as its own), so every branch pays only for its own employees.
-        $groups = $hasBranches
+        $groups = [];
+        $buckets = $hasBranches
             ? $employees->groupBy(fn($e) => $e->company_branch_id ?? 0)
-            : collect([0 => $employees]);
+            : collect($employees->isEmpty() ? [] : [0 => $employees]);
 
-        $branchNames = $hasBranches
-            ? $company->branches()->pluck('name', 'id')
-            : collect();
+        foreach ($buckets as $branchKey => $group) {
+            $branchId = $hasBranches && $branchKey ? (int) $branchKey : null;
+            $groups[] = [
+                'branch_id' => $branchId,
+                'label'     => !$hasBranches
+                    ? $company->name
+                    : ($branchId ? ($branchNames[$branchId] ?? "Branch {$branchId}") : 'Head office'),
+                'employees' => $group,
+                'built'     => $this->buildInvoiceItems($group, $months),
+            ];
+        }
 
+        return compact('company', 'singleEmp', 'hasBranches', 'preferred', 'months', 'start', 'end',
+            'groups', 'alreadyCovered', 'alreadyInvoiced');
+    }
+
+    /** What the invoice(s) would contain, for the admin's preview */
+    public function preview(Request $request): JsonResponse
+    {
+        $plan = $this->planInvoice($request);
+        if ($plan instanceof JsonResponse) {
+            return $plan;
+        }
+
+        $groups = array_map(fn($g) => [
+            'label'      => $g['label'],
+            'employees'  => $g['employees']->count(),
+            'items'      => $g['built']['items'],
+            'total'      => $g['built']['total'],
+            'zero_plans' => $g['built']['zero_plans'],
+        ], $plan['groups']);
+
+        return response()->json([
+            'company'          => ['id' => $plan['company']->id, 'name' => $plan['company']->name],
+            'preferred_months' => $plan['preferred'],
+            'period_months'    => $plan['months'],
+            'period_start'     => $plan['start']->toDateString(),
+            'period_end'       => $plan['end']->toDateString(),
+            'period_text'      => BillingPeriod::rangeText($plan['start'], $plan['end']),
+            'employees'        => array_sum(array_column($groups, 'employees')),
+            'total'            => array_sum(array_column($groups, 'total')),
+            'groups'           => $groups,
+            'already_covered'  => $plan['alreadyCovered'],
+            'already_invoiced' => $plan['alreadyInvoiced'],
+            'zero_plans'       => array_values(array_unique(array_merge([], ...array_column($groups, 'zero_plans')))),
+        ]);
+    }
+
+    public function generate(Request $request): JsonResponse
+    {
+        $plan = $this->planInvoice($request);
+        if ($plan instanceof JsonResponse) {
+            return $plan;
+        }
+        ['company' => $company, 'singleEmp' => $singleEmp, 'hasBranches' => $hasBranches,
+         'months' => $months, 'start' => $start, 'end' => $end] = $plan;
+
+        if (!$plan['groups']) {
+            $why = [];
+            if ($plan['alreadyCovered'])  $why[] = "{$plan['alreadyCovered']} already paid until after " . $start->format('j M Y');
+            if ($plan['alreadyInvoiced']) $why[] = "{$plan['alreadyInvoiced']} already on an unpaid invoice";
+            $msg = $singleEmp
+                ? 'This employee cannot be invoiced for this period.'
+                : 'No employees to invoice for this period.';
+            return response()->json(['message' => $msg . ($why ? ' (' . implode('; ', $why) . ')' : '')], 422);
+        }
+
+        $label   = BillingPeriod::rangeText($start, $end);
         $created = [];
         $skipped = [];
 
-        foreach ($groups as $branchKey => $group) {
-            $branchId = $hasBranches && $branchKey ? (int) $branchKey : null;
-            $label    = !$hasBranches
-                ? $company->name
-                : ($branchId ? ($branchNames[$branchId] ?? "Branch {$branchId}") : 'Head office');
-
-            $built = $this->buildInvoiceItems($group);
-
+        foreach ($plan['groups'] as $g) {
+            $built = $g['built'];
             if ($built['total'] < 100) {
-                $skipped[] = [
-                    'branch'  => $label,
-                    'total'   => $built['total'],
-                    'details' => $built['details'],
-                ];
+                $skipped[] = ['branch' => $g['label'], 'total' => $built['total'], 'details' => $built['details']];
                 continue;
             }
 
-            $created[] = DB::transaction(function () use ($request, $company, $built, $branchId, $hasBranches, $singleEmp): BillingInvoice {
+            $created[] = DB::transaction(function () use ($request, $company, $built, $g, $hasBranches, $singleEmp, $months, $start, $end, $label): BillingInvoice {
                 $invoice = BillingInvoice::create([
                     'company_id'        => $company->id,
-                    'company_branch_id' => $branchId,
+                    'company_branch_id' => $g['branch_id'],
                     'branch_scoped'     => $hasBranches,
                     'employee_id'       => $singleEmp ? $request->employee_id : null,
-                    'billing_period'    => $request->billing_period,
+                    'billing_period'    => $label,
+                    'period_months'     => $months,
+                    'period_start'      => $start->toDateString(),
+                    'period_end'        => $end->toDateString(),
                     'total_amount'      => $built['total'],
                     'due_date'          => $request->due_date,
                     'notes'             => $request->notes,
@@ -170,6 +243,7 @@ class AdminBillingController extends Controller
                 foreach ($built['items'] as $item) {
                     $invoice->items()->create($item);
                 }
+                $invoice->coveredEmployees()->attach($g['employees']->pluck('id')->all());
 
                 return $invoice->load(['items', 'companyBranch:id,name']);
             });
@@ -185,8 +259,9 @@ class AdminBillingController extends Controller
 
         $message = count($created) === 1
             ? "Invoice {$created[0]->invoice_number} generated for {$company->name}"
-                . ($hasBranches ? ' (' . ($created[0]->companyBranch?->name ?? 'Head office') . ')' : '') . '.'
-            : count($created) . " invoices generated for {$company->name}, one per branch.";
+                . ($hasBranches ? ' (' . ($created[0]->companyBranch?->name ?? 'Head office') . ')' : '')
+                . ", covering {$label}."
+            : count($created) . " invoices generated for {$company->name}, one per branch, covering {$label}.";
         if ($skipped) {
             $message .= ' Skipped (below ETB 100): ' . implode(', ', array_map(fn($s) => $s['branch'], $skipped)) . '.';
         }
@@ -203,9 +278,11 @@ class AdminBillingController extends Controller
      * Price a group of employees: resolve each one's level→tier→plan, then group by the
      * resolved plan so tiers that fall back to the same plan aren't shown as duplicate lines.
      *
-     * @return array{items: array, total: float|int, details: string}
+     * Each line is employees × monthly price × months.
+     *
+     * @return array{items: array, total: float|int, details: string, zero_plans: array}
      */
-    private function buildInvoiceItems($employees): array
+    private function buildInvoiceItems($employees, int $months = 1): array
     {
         $planByTier   = [];   // tier => ['planKey', 'planTier', 'planName', 'price']
         $groupsByPlan = [];   // planKey => ['plan_tier', 'plan_name', 'unit_price', 'count']
@@ -241,15 +318,20 @@ class AdminBillingController extends Controller
 
         $total = 0;
         $items = [];
+        $zeroPlans = [];
         foreach ($groupsByPlan as $info) {
-            $subtotal = $info['count'] * $info['unit_price'];
+            $subtotal = $info['count'] * $info['unit_price'] * $months;
             $total   += $subtotal;
+            if (!$info['unit_price']) {
+                $zeroPlans[] = $info['plan_name'];
+            }
 
             $items[] = [
                 'plan_tier'      => $info['plan_tier'],
                 'plan_name'      => $info['plan_name'],
                 'employee_count' => $info['count'],
                 'unit_price'     => $info['unit_price'],
+                'months'         => $months,
                 'subtotal'       => $subtotal,
             ];
         }
@@ -260,9 +342,10 @@ class AdminBillingController extends Controller
         }
 
         return [
-            'items'   => $items,
-            'total'   => $total,
-            'details' => $details ? ' Plan lookup: ' . implode('; ', $details) . '.' : '',
+            'items'      => $items,
+            'total'      => $total,
+            'details'    => $details ? ' Plan lookup: ' . implode('; ', $details) . '.' : '',
+            'zero_plans' => $zeroPlans,
         ];
     }
 
@@ -292,8 +375,12 @@ class AdminBillingController extends Controller
         } catch (\Throwable $e) {
             \Illuminate\Support\Facades\Log::error('Invoice sent Telegram failed: ' . $e->getMessage());
         }
+        $emailed = BillingMailer::invoiceSent($billingInvoice->load(['company', 'items', 'companyBranch:id,name']));
 
-        return response()->json(['message' => 'Invoice sent to company.', 'invoice' => $this->formatInvoice($billingInvoice)]);
+        return response()->json([
+            'message' => 'Invoice sent to company' . ($emailed ? ' and emailed to ' . implode(', ', $emailed) : '') . '.',
+            'invoice' => $this->formatInvoice($billingInvoice),
+        ]);
     }
 
     /* ── Delete draft invoice ─────────────────────────────────── */
@@ -364,13 +451,18 @@ class AdminBillingController extends Controller
         } catch (\Throwable $e) {
             \Illuminate\Support\Facades\Log::error('Payment verified Telegram failed: ' . $e->getMessage());
         }
+        BillingMailer::paymentConfirmed($billingPayment->invoice->load(['company', 'companyBranch:id,name']), $result['employees']);
+
+        $until = $result['paid_until'] ? Carbon::parse($result['paid_until'])->format('j M Y') : null;
 
         return response()->json([
             'message' => sprintf(
-                'Payment verified. %d employee(s) are now marked as paid and %d gym membership(s) have been activated.',
+                'Payment verified. %d employee(s) now have access%s, and %d new gym membership(s) were activated.',
                 $result['employees'],
+                $until ? " until {$until}" : '',
                 $result['memberships']
             ),
+            'paid_until'          => $result['paid_until'],
             'employees_updated'   => $result['employees'],
             'memberships_created' => $result['memberships'],
         ]);
@@ -536,6 +628,10 @@ class AdminBillingController extends Controller
             'id'             => $inv->id,
             'invoice_number' => $inv->invoice_number,
             'billing_period' => $inv->billing_period,
+            'period_months'  => (int) ($inv->period_months ?: 1),
+            'period_start'   => $inv->period_start?->toDateString(),
+            'period_end'     => $inv->period_end?->toDateString(),
+            'covered_count'  => $inv->coveredEmployees()->count(),
             'total_amount'   => $inv->total_amount,
             'due_date'       => $inv->due_date?->toDateString(),
             'notes'          => $inv->notes,
@@ -559,6 +655,7 @@ class AdminBillingController extends Controller
                 'plan_name'      => $item->plan_name,
                 'employee_count' => $item->employee_count,
                 'unit_price'     => $item->unit_price,
+                'months'         => (int) ($item->months ?: 1),
                 'subtotal'       => $item->subtotal,
             ])->values() ?? [],
             'latest_payment' => $inv->latestPayment ? $this->formatPayment($inv->latestPayment) : null,
