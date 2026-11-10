@@ -161,6 +161,32 @@ class User extends Authenticatable implements CanResetPasswordContract
     /** Roles gym owner can create */
     public const GYM_SUB_ROLES = ['gym_hr', 'gym_executive', 'gym_finance'];
 
+    /** super_admin and fitaccess_admin: every admin permission. */
+    public function isFullAdmin(): bool
+    {
+        return in_array($this->role, ['super_admin', 'fitaccess_admin'], true);
+    }
+
+    /**
+     * Which part of the platform this account belongs to:
+     * 'admin' | 'company' | 'gym' | 'employee' | 'member', or null if unknown.
+     * Custom roles take the scope they were created with (roles.scope).
+     * Used by the 'area:' route middleware.
+     */
+    public function area(): ?string
+    {
+        $role = (string) $this->role;
+
+        return match (true) {
+            in_array($role, self::ADMIN_ROLES, true)                                  => 'admin',
+            in_array($role, ['company_hr', ...self::COMPANY_SUB_ROLES], true)          => 'company',
+            in_array($role, ['gym_partner', 'gym_staff', ...self::GYM_SUB_ROLES], true) => 'gym',
+            $role === 'employee'                                                       => 'employee',
+            $role === 'member'                                                         => 'member',
+            default => \App\Models\Role::where('name', $role)->value('scope'),
+        };
+    }
+
     /* ── Permission system ─────────────────────────────────────── */
 
     /**

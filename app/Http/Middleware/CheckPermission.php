@@ -10,6 +10,7 @@ class CheckPermission
 {
     /**
      * Usage: Route::middleware('permission:billing.view')
+     *        Route::middleware('permission:companies.view|billing.view')  (any of)
      */
     public function handle(Request $request, Closure $next, string $permission): Response
     {
@@ -19,7 +20,9 @@ class CheckPermission
             return response()->json(['message' => 'Unauthenticated.'], 401);
         }
 
-        if (!$user->hasPermission($permission)) {
+        $anyOf = explode('|', $permission);
+
+        if (!collect($anyOf)->contains(fn (string $p) => $user->hasPermission($p))) {
             return response()->json([
                 'message'    => 'You do not have permission to perform this action.',
                 'permission' => $permission,

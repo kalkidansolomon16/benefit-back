@@ -17,6 +17,7 @@ return Application::configure(basePath: dirname(__DIR__))
         $middleware->prepend(\App\Http\Middleware\RejectUntrustedHost::class);
         $middleware->append(\App\Http\Middleware\SecurityHeaders::class);
         $middleware->alias([
+            'area'       => \App\Http\Middleware\EnsureArea::class,
             'permission' => \App\Http\Middleware\CheckPermission::class,
             'branch.write' => \App\Http\Middleware\EnsureBranchWritable::class,
         ]);
