@@ -181,6 +181,12 @@ Route::prefix('v1')->group(function () {
             Route::post('verification',          [\App\Http\Controllers\VerificationController::class, 'submit'])->middleware('throttle:6,60');
             Route::get('verification/photo',     [\App\Http\Controllers\VerificationController::class, 'myPhoto']);
             Route::post('manual-checkins/{checkin}/report', [\App\Http\Controllers\ManualCheckinController::class, 'report'])->middleware('throttle:10,1');
+            // v2 content
+            Route::get('news',                   [\App\Http\Controllers\ContentController::class, 'news']);
+            Route::get('news/{id}',              [\App\Http\Controllers\ContentController::class, 'newsArticle'])->whereNumber('id');
+            Route::get('training',               [\App\Http\Controllers\ContentController::class, 'training']);
+            Route::get('training/{id}',          [\App\Http\Controllers\ContentController::class, 'trainingVideo'])->whereNumber('id');
+            Route::post('training/{id}/progress', [\App\Http\Controllers\ContentController::class, 'trainingProgress'])->whereNumber('id')->middleware('throttle:60,1');
             // v2 link a company membership (12-digit number + code to the company-registered email)
             Route::post('link/lookup',           [\App\Http\Controllers\LinkMembershipController::class, 'lookup'])->middleware('throttle:10,1');
             Route::post('link/resend',           [\App\Http\Controllers\LinkMembershipController::class, 'resend'])->middleware('throttle:3,1');
@@ -420,6 +426,18 @@ Route::prefix('v1')->group(function () {
             Route::post('companies/{company}/branches/{branch}/reset-2fa', [AdminUserController::class, 'resetCompanyBranchTwoFactor'])->middleware('permission:companies.edit');
             Route::patch('companies/{company}/license-status',     [CompanyController::class, 'updateLicenseStatus'])->middleware('permission:companies.edit');
             Route::post('companies/{company}/deactivate',          [AdminBillingController::class, 'deactivateCompany'])->middleware('permission:companies.edit|billing.create');
+
+            // v2 content management (full admins)
+            Route::middleware('area:fulladmin')->group(function () {
+                Route::get('content/news',                 [\App\Http\Controllers\ContentController::class, 'adminNews']);
+                Route::post('content/news',                [\App\Http\Controllers\ContentController::class, 'saveNews']);
+                Route::post('content/news/{id}',           [\App\Http\Controllers\ContentController::class, 'saveNews'])->whereNumber('id');
+                Route::delete('content/news/{id}',         [\App\Http\Controllers\ContentController::class, 'deleteNews'])->whereNumber('id');
+                Route::get('content/training',             [\App\Http\Controllers\ContentController::class, 'adminTraining']);
+                Route::post('content/training',            [\App\Http\Controllers\ContentController::class, 'saveTraining']);
+                Route::post('content/training/{id}',       [\App\Http\Controllers\ContentController::class, 'saveTraining'])->whereNumber('id');
+                Route::delete('content/training/{id}',     [\App\Http\Controllers\ContentController::class, 'deleteTraining'])->whereNumber('id');
+            });
 
             // v2 profile corrections review
             Route::get('profile-corrections',                        [\App\Http\Controllers\ProfileChangeController::class, 'index'])->middleware('permission:employees.view');
