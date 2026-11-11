@@ -22,6 +22,14 @@ class AppServiceProvider extends ServiceProvider
 {
     public function register(): void
     {
+        // v2 one-time codes by SMS (see App\Services\Sms\SmsSender).
+        $this->app->bind(\App\Services\Sms\SmsSender::class, fn () => match (config('services.sms.driver')) {
+            'log' => $this->app->environment('production')
+                ? new \App\Services\Sms\NullSmsSender()
+                : new \App\Services\Sms\LogSmsSender(),
+            default => new \App\Services\Sms\NullSmsSender(),
+        });
+
         //
     }
 

@@ -61,4 +61,9 @@ return [
         'min_score'  => env('RECAPTCHA_MIN_SCORE', 0.5),
     ],
 
+    // v2 one-time codes by SMS: none (default) | log (development only).
+    'sms' => [
+        'driver' => env('SMS_DRIVER', 'none'),
+    ],
+
 ];

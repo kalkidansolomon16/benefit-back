@@ -211,6 +211,7 @@ class MobileController extends Controller
                 'plan_name'      => $employee?->activeMembership?->plan?->name,
                 'plan_tier'      => $employee?->activeMembership?->plan?->tier,
                 'access_status'  => $employee?->accessStatus(),
+                'pending_corrections' => \App\Http\Controllers\ProfileChangeController::pendingFor($user),
                 'company_logo_url' => $employee?->company?->logo_path ? config('fitaccess.api_url').'/api/v1/files/'.ltrim($employee->company->logo_path, '/') : null,
                 'name'         => $user->name,
                 'email'        => $user->email,
@@ -231,45 +232,32 @@ class MobileController extends Controller
 
     // ── Update profile ────────────────────────────────────────────────────────
 
+    /**
+     * v2: profile details can't be edited freely any more. Phone and email
+     * change with a code (POST /mobile/profile/contact), other details
+     * through POST /mobile/profile/corrections.
+     */
     public function updateProfile(Request $request): JsonResponse
     {
-        $request->validate([
-            'name'  => 'sometimes|string|max:255',
-            'phone' => 'sometimes|string|max:20',
-        ]);
-
-        $user = $request->user();
-        $user->update($request->only('name', 'phone'));
-
         return response()->json([
-            'data'    => ['id' => $user->id, 'name' => $user->name, 'phone' => $user->phone],
-            'message' => 'Profile updated successfully.',
-        ]);
+            'message' => 'Profile details can’t be edited in the app. Change your phone or email with a code, or request a correction.',
+            'code'    => 'profile_read_only',
+        ], 410);
     }
 
     // ── Upload profile photo ──────────────────────────────────────────────────
 
+    /**
+     * v2: the photo staff compare with the member's face comes from
+     * identity verification (POST /mobile/verification), so members can't
+     * replace it freely.
+     */
     public function uploadPhoto(Request $request): JsonResponse
     {
-        $request->validate([
-            'photo' => 'required|image|mimes:jpg,jpeg,png|max:5120',
-        ]);
-
-        $user = $request->user();
-
-        // Delete old photo
-        if ($user->photo_path) {
-            Storage::disk('public')->delete($user->photo_path);
-        }
-
-        $path = $request->file('photo')->store("profile-photos/{$user->id}", 'public');
-        $user->update(['photo_path' => $path]);
-        $url = url('/api/v1/files/' . ltrim($path, '/'));
-
         return response()->json([
-            'data'    => ['photo_url' => $url],
-            'message' => 'Photo updated successfully.',
-        ]);
+            'message' => 'Your photo comes from identity verification. Request a re-verification to change it.',
+            'code'    => 'photo_from_verification',
+        ], 410);
     }
 
     // ── Checkin history ───────────────────────────────────────────────────────

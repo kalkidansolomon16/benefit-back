@@ -181,6 +181,14 @@ Route::prefix('v1')->group(function () {
             Route::post('verification',          [\App\Http\Controllers\VerificationController::class, 'submit'])->middleware('throttle:6,60');
             Route::get('verification/photo',     [\App\Http\Controllers\VerificationController::class, 'myPhoto']);
             Route::post('manual-checkins/{checkin}/report', [\App\Http\Controllers\ManualCheckinController::class, 'report'])->middleware('throttle:10,1');
+            // v2 link a company membership (12-digit number + code to the company-registered email)
+            Route::post('link/lookup',           [\App\Http\Controllers\LinkMembershipController::class, 'lookup'])->middleware('throttle:10,1');
+            Route::post('link/resend',           [\App\Http\Controllers\LinkMembershipController::class, 'resend'])->middleware('throttle:3,1');
+            Route::post('link/confirm',          [\App\Http\Controllers\LinkMembershipController::class, 'confirm'])->middleware('throttle:10,1');
+            // v2 read-only profile: contact change with a code, corrections
+            Route::post('profile/contact',        [\App\Http\Controllers\ProfileChangeController::class, 'requestContactChange'])->middleware('throttle:5,10');
+            Route::post('profile/contact/verify', [\App\Http\Controllers\ProfileChangeController::class, 'verifyContactChange'])->middleware('throttle:10,1');
+            Route::post('profile/corrections',    [\App\Http\Controllers\ProfileChangeController::class, 'requestCorrection'])->middleware('throttle:5,60');
             Route::get('packages',               [\App\Http\Controllers\MobileController::class, 'packages']);
             Route::get('subscription',           [\App\Http\Controllers\MobileController::class, 'subscription']);
             Route::post('subscription',          [\App\Http\Controllers\MobileController::class, 'createSubscription']);
@@ -412,6 +420,10 @@ Route::prefix('v1')->group(function () {
             Route::post('companies/{company}/branches/{branch}/reset-2fa', [AdminUserController::class, 'resetCompanyBranchTwoFactor'])->middleware('permission:companies.edit');
             Route::patch('companies/{company}/license-status',     [CompanyController::class, 'updateLicenseStatus'])->middleware('permission:companies.edit');
             Route::post('companies/{company}/deactivate',          [AdminBillingController::class, 'deactivateCompany'])->middleware('permission:companies.edit|billing.create');
+
+            // v2 profile corrections review
+            Route::get('profile-corrections',                        [\App\Http\Controllers\ProfileChangeController::class, 'index'])->middleware('permission:employees.view');
+            Route::post('profile-corrections/{id}/{decision}',      [\App\Http\Controllers\ProfileChangeController::class, 'review'])->whereNumber('id')->whereIn('decision', ['approve', 'reject'])->middleware('permission:employees.edit');
 
             // v2 identity verification review
             Route::get('verifications',                              [\App\Http\Controllers\VerificationController::class, 'index'])->middleware('permission:employee_approvals.view|employees.view');
