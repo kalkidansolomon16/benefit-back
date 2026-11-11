@@ -180,6 +180,7 @@ Route::prefix('v1')->group(function () {
             Route::get('verification',           [\App\Http\Controllers\VerificationController::class, 'status']);
             Route::post('verification',          [\App\Http\Controllers\VerificationController::class, 'submit'])->middleware('throttle:6,60');
             Route::get('verification/photo',     [\App\Http\Controllers\VerificationController::class, 'myPhoto']);
+            Route::post('manual-checkins/{checkin}/report', [\App\Http\Controllers\ManualCheckinController::class, 'report'])->middleware('throttle:10,1');
             Route::get('packages',               [\App\Http\Controllers\MobileController::class, 'packages']);
             Route::get('subscription',           [\App\Http\Controllers\MobileController::class, 'subscription']);
             Route::post('subscription',          [\App\Http\Controllers\MobileController::class, 'createSubscription']);
@@ -196,6 +197,11 @@ Route::prefix('v1')->group(function () {
             Route::get('me',                     [\App\Http\Controllers\PartnerMobileController::class, 'me']);
             Route::get('dashboard',              [\App\Http\Controllers\PartnerMobileController::class, 'dashboard']);
             Route::post('scan',                  [\App\Http\Controllers\PartnerMobileController::class, 'scan'])->middleware('throttle:30,1');
+            // v2 manual check-in (member number + national ID check)
+            Route::get('members/{number}',       [\App\Http\Controllers\ManualCheckinController::class, 'lookup'])->middleware('throttle:30,1');
+            Route::get('members/{number}/photo', [\App\Http\Controllers\ManualCheckinController::class, 'photo'])->middleware('throttle:30,1');
+            Route::post('manual-checkins',       [\App\Http\Controllers\ManualCheckinController::class, 'store'])->middleware('throttle:20,1');
+            Route::post('manual-checkins/mismatch', [\App\Http\Controllers\ManualCheckinController::class, 'mismatch'])->middleware('throttle:20,1');
             Route::get('visits/today',           [\App\Http\Controllers\PartnerMobileController::class, 'visitsToday']);
             Route::get('visits/monthly',         [\App\Http\Controllers\PartnerMobileController::class, 'visitsMonthly']);
             Route::get('reports',                [\App\Http\Controllers\PartnerMobileController::class, 'reports']);

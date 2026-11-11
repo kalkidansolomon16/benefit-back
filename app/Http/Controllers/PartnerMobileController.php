@@ -184,129 +184,23 @@ class PartnerMobileController extends Controller
         }
 
         $member = User::find($qrToken->user_id);
-
-        // ── 2. Member active check ────────────────────────────────────────────
-        if (!$member || !$member->is_active) {
-            return $this->rejectScan($request, $gym, 'member_suspended',
-                'Member account is suspended.', $member?->id);
+        if (!$member) {
+            return $this->rejectScan($request, $gym, 'member_suspended', 'Member account is suspended.');
         }
+        $memberCode = $member->member_code ?? $member->fan_number;
 
-        // ── 3. Find active subscription (B2C or B2B employee) ────────────────
-        $subscription = MobileSubscription::with('plan')
-            ->where('user_id', $member->id)
-            ->where('status', 'active')
-            ->where('end_date', '>=', now())
-            ->latest()
-            ->first();
-
-        $planTier      = null;
-        $planName      = null;
-        $employeeId    = null;
-        $empMembership = null;
-        $memberCode    = $member->member_code ?? $member->fan_number;
-
-        if ($subscription) {
-            $planTier = $subscription->plan?->tier;
-            $planName = $subscription->plan?->name;
-        } else {
-            // Check B2B employee membership
-            $empMembership = DB::table('memberships')
-                ->join('employees', 'memberships.employee_id', '=', 'employees.id')
-                ->join('membership_plans', 'memberships.plan_id', '=', 'membership_plans.id')
-                ->where('employees.user_id', $member->id)
-                ->where('memberships.status', 'active')
-                ->where('memberships.end_date', '>=', now()->toDateString())
-                ->select('memberships.id as membership_id', 'memberships.employee_id', 'membership_plans.tier', 'membership_plans.name')
-                ->first();
-
-            if (!$empMembership) {
-                return $this->rejectScan($request, $gym, 'no_subscription',
-                    'No active subscription. Member must purchase a plan.', $member->id);
-            }
-
-            $planTier   = $empMembership->tier;
-            $planName   = $empMembership->name;
-            $employeeId = $empMembership->employee_id;
-
-            // Company employees: only while their company's invoice covers today
-            $emp = \App\Models\Employee::find($employeeId);
-            if (!$emp || !$emp->hasPaidAccess()) {
-                return $this->rejectScan($request, $gym, 'not_paid',
-                    $emp ? $emp->paidAccessMessage() : 'No active FitAccess membership.', $member->id);
-            }
+        // ── 2–4. Account, plan, company payment and tier (CheckinService) ───
+        $checkins = app(\App\Services\CheckinService::class);
+        $eligible = $checkins->eligibility($member, $gym);
+        if (!$eligible['ok']) {
+            return $this->rejectScan($request, $gym, $eligible['code'], $eligible['message'], $member->id);
         }
-
-        // ── 4. Tier access check ──────────────────────────────────────────────
-        // Plan tiers are free text (e.g. "Fit Premium"), gym tiers are enum keys
-        // (e.g. "premium") — normalise both before ranking or every plan scores 0.
-        $normalize  = fn ($t) => preg_replace('/^fit_/', '', preg_replace('/[\s\-]+/', '_', strtolower(trim((string) $t))));
-        $tierRank   = ['basic' => 1, 'basic_plus' => 2, 'premium' => 3, 'platinum' => 3];
-        $memberRank = $tierRank[$normalize($planTier)] ?? 0;
-        $gymRank    = $tierRank[$normalize($gym->tier)] ?? 0;
-
-        if ($memberRank < $gymRank) {
-            $required = match ($gym->tier) {
-                'platinum', 'premium' => 'Platinum',
-                'basic_plus'          => 'Basic Plus or Platinum',
-                default               => 'Basic',
-            };
-            return $this->rejectScan($request, $gym, 'tier_too_low',
-                "This facility requires a {$required} plan. Member needs to upgrade.", $member->id);
-        }
+        $planName = $eligible['plan_name'];
+        $planTier = $eligible['plan_tier'];
+        $maxMonthly = \App\Services\CheckinService::MAX_MONTHLY;
 
         // ── 5–7. Visit rules + record, serialised per member ─────────────────
-        // Locking the member row makes the 12-hour and monthly-cap checks and
-        // the insert one atomic step, so two concurrent scans can't both pass.
-        $maxMonthly = 20; // default cap — can be plan-specific
-
-        $outcome = DB::transaction(function () use ($request, $gym, $member, $employeeId, $empMembership, $maxMonthly, $byDeskCode) {
-            User::whereKey($member->id)->lockForUpdate()->first();
-
-            $memberVisits = fn () => Checkin::where('gym_id', $gym->id)
-                ->where(function ($q) use ($member, $employeeId) {
-                    $q->where('user_id', $member->id);
-                    if ($employeeId) {
-                        $q->orWhere('employee_id', $employeeId);
-                    }
-                });
-
-            // ── 5. 12-HOUR RULE ───────────────────────────────────────────────
-            $lastCheckin = $memberVisits()->orderByDesc('checked_in_at')->first();
-
-            if ($lastCheckin) {
-                $hoursSince = Carbon::parse($lastCheckin->checked_in_at)->diffInMinutes(now()) / 60;
-                if ($hoursSince < 12) {
-                    $hoursRemaining = round(12 - $hoursSince, 1);
-                    return ['rejected', 'cooldown',
-                        "You already checked in here today. You can check in again in {$hoursRemaining} hours."];
-                }
-            }
-
-            // ── 6. Monthly cap check ──────────────────────────────────────────
-            $monthlyCount = $memberVisits()
-                ->whereYear('checked_in_at', now()->year)
-                ->whereMonth('checked_in_at', now()->month)
-                ->count();
-
-            if ($monthlyCount >= $maxMonthly) {
-                return ['rejected', 'monthly_cap',
-                    "Monthly visit limit reached for this facility ({$monthlyCount} visits used). Limit resets on the 1st."];
-            }
-
-            // ── 7. Record check-in ────────────────────────────────────────────
-            $checkin = Checkin::create([
-                'gym_id'        => $gym->id,
-                'employee_id'   => $employeeId,
-                'user_id'       => $member->id,
-                'checked_in_at' => now(),
-                'method'        => $byDeskCode ? 'desk_code' : 'qr_code',
-                'recorded_by'   => $request->user()->name,
-                // membership_id references B2B `memberships`; B2C visits are linked by user_id.
-                'membership_id' => $empMembership->membership_id ?? null,
-            ]);
-
-            return ['recorded', $checkin, $monthlyCount + 1];
-        });
+        $outcome = $checkins->record($gym, $member, $eligible, $byDeskCode ? 'desk_code' : 'qr_code', $request->user()->name);
 
         if ($outcome[0] === 'rejected') {
             return $this->rejectScan($request, $gym, $outcome[1], $outcome[2], $member->id);
