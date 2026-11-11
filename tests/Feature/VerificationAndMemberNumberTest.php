@@ -54,7 +54,7 @@ class VerificationAndMemberNumberTest extends TestCase
     public function test_selfie_is_stored_privately_and_marks_the_member_pending(): void
     {
         $this->as($this->member);
-        $this->getJson('/api/v1/mobile/profile')->assertJsonPath('data.verification_status', 'not_started');
+        $this->getJson('/api/v1/mobile/profile')->assertJsonPath('data.verification_status', 'not_started')->assertJsonPath('data.verification_required', false);
 
         $this->as($this->member);
         $this->post('/api/v1/mobile/verification', ['photo' => UploadedFile::fake()->image('selfie.jpg', 800, 1000)], ['Accept' => 'application/json'])

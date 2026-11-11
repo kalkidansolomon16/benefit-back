@@ -85,6 +85,10 @@ class ManualCheckinTest extends TestCase
         $note = Notification::where('user_id', $this->member->id)->where('type', 'manual_checkin')->first();
         $this->assertNotNull($note, 'the member is told');
         $this->assertSame('Kuriftu Gym', $note->data['gym']);
+        // The app opens "Was this you?" from these details.
+        $this->as($this->member)->getJson('/api/v1/mobile/notifications')
+            ->assertJsonPath('data.0.type', 'manual_checkin')
+            ->assertJsonPath('data.0.data.checkin_id', $note->data['checkin_id']);
         $this->assertSame(MemberVerification::VERIFIED, MemberVerification::first()->status, 'staff checked the ID: first-visit verification');
     }
 

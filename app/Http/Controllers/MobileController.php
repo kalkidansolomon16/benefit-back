@@ -207,6 +207,8 @@ class MobileController extends Controller
                 // v2
                 'member_number'  => $user->memberNumber(),
                 'verification_status' => $verifications->statusFor($user),
+                // Whether check-in codes need a verified photo (REQUIRE_VERIFICATION).
+                'verification_required' => (bool) config('fitaccess.require_verification'),
                 'verification_rejection_reason' => $latestVerification?->status === 'rejected' ? $latestVerification->rejection_reason : null,
                 'plan_name'      => $employee?->activeMembership?->plan?->name,
                 'plan_tier'      => $employee?->activeMembership?->plan?->tier,
@@ -552,6 +554,8 @@ class MobileController extends Controller
                 'title'      => $n->title,
                 'body'       => $n->body,
                 'type'       => $n->type,
+                // Details the app opens the notification with (e.g. manual_checkin: checkin_id, gym, at).
+                'data'       => $n->data ?: null,
                 'is_read'    => $n->is_read,
                 'created_at' => $n->created_at?->toIso8601String(),
             ]),
