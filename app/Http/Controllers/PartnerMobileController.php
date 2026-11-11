@@ -16,6 +16,7 @@ use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Hash;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Log;
 use App\Mail\StaffInviteMail;
 use Illuminate\Support\Facades\Mail;
@@ -24,6 +25,9 @@ use Illuminate\Support\Str;
 
 class PartnerMobileController extends Controller
 {
+    /** Wrong front-desk codes allowed per staff account per 15 minutes. */
+    private const DESK_CODE_MAX_FAILURES = 10;
+
     // ── Get authenticated staff's gym ─────────────────────────────────────────
 
     private function getMyGym(Request $request): ?Gym
@@ -120,9 +124,11 @@ class PartnerMobileController extends Controller
     public function scan(Request $request, QrTokenService $qrTokens): JsonResponse
     {
         $request->validate([
-            'qr_token' => 'required|string|max:128',
+            'qr_token'  => 'required_without:desk_code|string|max:128',
+            // v2: the 6 digits under the member's QR, typed in by reception.
+            'desk_code' => 'required_without:qr_token|digits:'.QrTokenService::DESK_CODE_LENGTH,
             // Sent by app builds from before the fix. Ignored unless it disagrees.
-            'gym_id'   => 'sometimes|integer',
+            'gym_id'    => 'sometimes|integer',
         ]);
 
         $staff = $request->user();
@@ -148,8 +154,29 @@ class PartnerMobileController extends Controller
             ], 403);
         }
 
-        // ── 1. Redeem QR token (single use, short-lived) ──────────────────────
-        $qrToken = $qrTokens->consume($request->qr_token, $gym->id);
+        // ── 1. Redeem QR token or front-desk code (single use, short-lived) ──
+        $byDeskCode = !$request->filled('qr_token');
+
+        if ($byDeskCode) {
+            // Six digits can be guessed, so wrong codes are counted per staff
+            // account: 10 in 15 minutes blocks typed codes (the QR still works).
+            $failKey = 'desk-code-fail:'.$staff->id;
+            if ((int) Cache::get($failKey, 0) >= self::DESK_CODE_MAX_FAILURES) {
+                Log::warning('partner.scan.desk_code_locked', ['user_id' => $staff->id, 'gym_id' => $gym->id]);
+                return response()->json([
+                    'message' => 'Too many wrong front-desk codes. Scan the QR code instead, or try again in 15 minutes.',
+                ], 429);
+            }
+            $qrToken = $qrTokens->consumeDeskCode((string) $request->desk_code, $gym->id);
+            if (!$qrToken) {
+                Cache::add($failKey, 0, now()->addMinutes(15));
+                Cache::increment($failKey);
+                return $this->rejectScan($request, $gym, 'invalid_desk_code',
+                    'That front-desk code is wrong or has expired. Ask the member for the code on their screen now.');
+            }
+        } else {
+            $qrToken = $qrTokens->consume($request->qr_token, $gym->id);
+        }
 
         if (!$qrToken) {
             return $this->rejectScan($request, $gym, 'invalid_token',
@@ -232,7 +259,7 @@ class PartnerMobileController extends Controller
         // the insert one atomic step, so two concurrent scans can't both pass.
         $maxMonthly = 20; // default cap — can be plan-specific
 
-        $outcome = DB::transaction(function () use ($request, $gym, $member, $employeeId, $empMembership, $maxMonthly) {
+        $outcome = DB::transaction(function () use ($request, $gym, $member, $employeeId, $empMembership, $maxMonthly, $byDeskCode) {
             User::whereKey($member->id)->lockForUpdate()->first();
 
             $memberVisits = fn () => Checkin::where('gym_id', $gym->id)
@@ -272,7 +299,7 @@ class PartnerMobileController extends Controller
                 'employee_id'   => $employeeId,
                 'user_id'       => $member->id,
                 'checked_in_at' => now(),
-                'method'        => 'qr_code',
+                'method'        => $byDeskCode ? 'desk_code' : 'qr_code',
                 'recorded_by'   => $request->user()->name,
                 // membership_id references B2B `memberships`; B2C visits are linked by user_id.
                 'membership_id' => $empMembership->membership_id ?? null,

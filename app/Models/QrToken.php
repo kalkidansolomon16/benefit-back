@@ -12,9 +12,9 @@ use Illuminate\Database\Eloquent\Relations\BelongsTo;
  */
 class QrToken extends Model
 {
-    protected $fillable = ['user_id', 'token', 'expires_at', 'used_at', 'used_at_gym_id'];
+    protected $fillable = ['user_id', 'token', 'desk_code_hash', 'expires_at', 'used_at', 'used_at_gym_id'];
 
-    protected $hidden = ['token'];
+    protected $hidden = ['token', 'desk_code_hash'];
 
     protected $casts = [
         'expires_at' => 'datetime',

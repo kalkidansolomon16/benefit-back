@@ -8,6 +8,7 @@ use App\Models\GymStaff;
 use App\Models\MembershipPlan;
 use App\Models\MobileSubscription;
 use App\Models\User;
+use App\Services\QrTokenService;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Hash;
 use Illuminate\Testing\TestResponse;
@@ -205,7 +206,7 @@ class PartnerScanTest extends TestCase
 
         return $this->getJson('/api/v1/mobile/qr-token')
             ->assertOk()
-            ->assertJsonPath('data.expires_in', 60)
+            ->assertJsonPath('data.expires_in', QrTokenService::TTL_SECONDS)
             ->json('data.token');
     }
 

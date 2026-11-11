@@ -165,12 +165,14 @@ class MobileController extends Controller
         }
 
         // Short-lived, single-use token. The app refreshes it before it
-        // expires, so a screenshot or photo of the code is useless within a minute.
+        // expires, so a screenshot or photo of the code is useless within 30 s.
+        // desk_code: the 6 digits reception can type if the scan fails.
         $issued = app(QrTokenService::class)->issue($user);
 
         return response()->json([
             'data' => [
                 'token'        => $issued['token'],
+                'desk_code'    => $issued['desk_code'],
                 'member_code'  => $user->member_code,
                 'member_name'  => $user->name,
                 'expires_at'   => $issued['expires_at']->toIso8601String(),
