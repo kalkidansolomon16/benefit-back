@@ -37,6 +37,14 @@ return [
     // reminded to renew (sent by the daily `billing:coverage` command).
     'billing_reminder_days' => (int) env('BILLING_REMINDER_DAYS', 7),
 
+    // v2: refuse check-in codes until the member has submitted a selfie
+    // (pending or verified). Off until existing members have had time to
+    // verify; turning it on before that would lock them out.
+    'require_verification' => filter_var(env('REQUIRE_VERIFICATION', false), FILTER_VALIDATE_BOOL),
+
+    // v2 manual check-in at the front desk (member number + national ID).
+    'manual_checkins_per_month' => (int) env('MANUAL_CHECKINS_PER_MONTH', 2),
+
     // On in production by default; off for local development and tests.
     'enforce_trusted_hosts' => filter_var(
         env('ENFORCE_TRUSTED_HOSTS', env('APP_ENV') === 'production'),

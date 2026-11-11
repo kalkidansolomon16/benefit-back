@@ -177,6 +177,28 @@ class User extends Authenticatable implements CanResetPasswordContract
     /** Roles gym owner can create */
     public const GYM_SUB_ROLES = ['gym_hr', 'gym_executive', 'gym_finance'];
 
+    /**
+     * The 12-digit FitAccess number: the employee card number for company
+     * members, users.member_number for individual members.
+     */
+    public function memberNumber(): ?string
+    {
+        return $this->employee?->card_number ?? $this->member_number;
+    }
+
+    /** Gives an individual member a number the first time they get a plan. */
+    public function ensureMemberNumber(): ?string
+    {
+        if ($this->employee) {
+            return $this->employee->card_number;
+        }
+        if (!$this->member_number) {
+            $this->forceFill(['member_number' => \App\Support\CardNumber::generate()])->save();
+        }
+
+        return $this->member_number;
+    }
+
     /** super_admin and fitaccess_admin: every admin permission. */
     public function isFullAdmin(): bool
     {

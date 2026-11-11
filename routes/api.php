@@ -176,6 +176,10 @@ Route::prefix('v1')->group(function () {
             Route::patch('profile',              [\App\Http\Controllers\MobileController::class, 'updateProfile']);
             Route::post('profile/photo',         [\App\Http\Controllers\MobileController::class, 'uploadPhoto']);
             Route::get('checkins',               [\App\Http\Controllers\MobileController::class, 'checkins']);
+            // v2 identity verification (selfie, private storage)
+            Route::get('verification',           [\App\Http\Controllers\VerificationController::class, 'status']);
+            Route::post('verification',          [\App\Http\Controllers\VerificationController::class, 'submit'])->middleware('throttle:6,60');
+            Route::get('verification/photo',     [\App\Http\Controllers\VerificationController::class, 'myPhoto']);
             Route::get('packages',               [\App\Http\Controllers\MobileController::class, 'packages']);
             Route::get('subscription',           [\App\Http\Controllers\MobileController::class, 'subscription']);
             Route::post('subscription',          [\App\Http\Controllers\MobileController::class, 'createSubscription']);
@@ -402,6 +406,12 @@ Route::prefix('v1')->group(function () {
             Route::post('companies/{company}/branches/{branch}/reset-2fa', [AdminUserController::class, 'resetCompanyBranchTwoFactor'])->middleware('permission:companies.edit');
             Route::patch('companies/{company}/license-status',     [CompanyController::class, 'updateLicenseStatus'])->middleware('permission:companies.edit');
             Route::post('companies/{company}/deactivate',          [AdminBillingController::class, 'deactivateCompany'])->middleware('permission:companies.edit|billing.create');
+
+            // v2 identity verification review
+            Route::get('verifications',                              [\App\Http\Controllers\VerificationController::class, 'index'])->middleware('permission:employee_approvals.view|employees.view');
+            Route::get('verifications/{verification}/photo',         [\App\Http\Controllers\VerificationController::class, 'photo'])->middleware('permission:employee_approvals.view|employees.view');
+            Route::post('verifications/{verification}/approve',      [\App\Http\Controllers\VerificationController::class, 'approve'])->middleware('permission:employees.approve');
+            Route::post('verifications/{verification}/reject',       [\App\Http\Controllers\VerificationController::class, 'reject'])->middleware('permission:employees.approve');
 
             // Employer applications from the public form (no account exists until approved)
             Route::get('company-applications', [\App\Http\Controllers\CompanyApplicationController::class, 'index'])->middleware('permission:companies.view');

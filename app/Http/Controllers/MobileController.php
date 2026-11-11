@@ -164,6 +164,15 @@ class MobileController extends Controller
             }
         }
 
+        // v2: optionally require a submitted selfie before any code is issued.
+        if (config('fitaccess.require_verification')
+            && !in_array(app(\App\Services\VerificationService::class)->statusFor($user), ['pending', 'verified'], true)) {
+            return response()->json([
+                'message' => 'Verify your identity first: add a selfie in the app so the front desk can match your face.',
+                'code'    => 'verification_required',
+            ], 403);
+        }
+
         // Short-lived, single-use token. The app refreshes it before it
         // expires, so a screenshot or photo of the code is useless within 30 s.
         // desk_code: the 6 digits reception can type if the scan fails.
@@ -187,11 +196,22 @@ class MobileController extends Controller
 
     public function profile(Request $request): JsonResponse
     {
-        $user = $request->user()->load('employee.company');
+        $user = $request->user()->load('employee.company', 'employee.activeMembership.plan');
+        $verifications = app(\App\Services\VerificationService::class);
+        $latestVerification = $verifications->latest($user);
+        $employee = $user->employee;
 
         return response()->json([
             'data' => [
                 'id'           => $user->id,
+                // v2
+                'member_number'  => $user->memberNumber(),
+                'verification_status' => $verifications->statusFor($user),
+                'verification_rejection_reason' => $latestVerification?->status === 'rejected' ? $latestVerification->rejection_reason : null,
+                'plan_name'      => $employee?->activeMembership?->plan?->name,
+                'plan_tier'      => $employee?->activeMembership?->plan?->tier,
+                'access_status'  => $employee?->accessStatus(),
+                'company_logo_url' => $employee?->company?->logo_path ? config('fitaccess.api_url').'/api/v1/files/'.ltrim($employee->company->logo_path, '/') : null,
                 'name'         => $user->name,
                 'email'        => $user->email,
                 'phone'        => $user->phone,
@@ -419,6 +439,9 @@ class MobileController extends Controller
         // Revoke any outstanding check-in codes; the QR screen issues a fresh one.
         QrToken::where('user_id', $user->id)->delete();
 
+        // v2: the member number arrives with the first plan.
+        $memberNumber = $user->ensureMemberNumber();
+
         return response()->json([
             'data' => [
                 'id'           => $sub->id,
@@ -427,6 +450,7 @@ class MobileController extends Controller
                 'package_tier' => $plan->tier,
                 'start_date'   => $startDate,
                 'end_date'     => $endDate,
+                'member_number'=> $memberNumber,
             ],
             'message' => 'Subscription activated successfully.',
         ], 201);

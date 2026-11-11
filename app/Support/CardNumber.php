@@ -5,7 +5,7 @@ namespace App\Support;
 use App\Models\Employee;
 
 /**
- * FitAccess card numbers: 12 digits, the last one a Luhn check digit so a
+ * FitAccess card / member numbers (employees and individual members): 12 digits, the last one a Luhn check digit so a
  * mistyped digit is caught before any lookup. Numbers are random (not
  * sequential) so they cannot be guessed from one another.
  */
@@ -21,9 +21,17 @@ class CardNumber
                 $body .= random_int(0, 9);
             }
             $number = $body . self::checkDigit($body);
-        } while (Employee::withTrashed()->where('card_number', $number)->exists());
+        } while (self::taken($number));
 
         return $number;
+    }
+
+    /** Employees and individual members share one number space. */
+    private static function taken(string $number): bool
+    {
+        return Employee::withTrashed()->where('card_number', $number)->exists()
+            || (\Illuminate\Support\Facades\Schema::hasColumn('users', 'member_number')
+                && \Illuminate\Support\Facades\DB::table('users')->where('member_number', $number)->exists());
     }
 
     /** Strips spaces and dashes; returns null when it is not a well-formed number. */
