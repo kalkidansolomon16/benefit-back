@@ -16,6 +16,10 @@ return [
 
     'api_url' => rtrim(env('API_PUBLIC_URL', 'https://fitaccess-api.kalkidan.net'), '/'),
 
+    // Where the membership-number email sends employees to get the app
+    // (store page once published).
+    'member_app_url' => env('MEMBER_APP_URL', 'https://fit-access.com'),
+
     'trusted_hosts' => array_values(array_filter(array_map(
         'trim',
         explode(',', env('TRUSTED_HOSTS', 'fitaccess-api.kalkidan.net,www.fitaccess-api.kalkidan.net'))

@@ -2,6 +2,7 @@
 
 namespace App\Services;
 
+use App\Mail\FitAccessNotificationMail;
 use App\Models\Employee;
 use App\Models\Gym;
 use App\Models\Membership;
@@ -160,6 +161,10 @@ class MembershipService
         $totalMemberships = 0;
 
         foreach ($employees as $employee) {
+            // Access starting now (first package, or after a lapse): the
+            // employee gets their membership number by email.
+            $startsNow = !$employee->paid_until || $employee->paid_until->lt(now()->startOfDay());
+
             // Never shorten coverage an employee already has
             $newUntil = $employee->paid_until && $employee->paid_until->gt($until)
                 ? $employee->paid_until->copy()
@@ -173,6 +178,10 @@ class MembershipService
 
             $tier = self::tierFromLevel($employee->level);
             $totalMemberships += self::provisionForEmployee($employee, $tier, $newUntil);
+
+            if ($startsNow) {
+                self::sendMembershipNumber($employee);
+            }
         }
 
         return [
@@ -180,5 +189,33 @@ class MembershipService
             'memberships' => $totalMemberships,
             'paid_until'  => $until->toDateString(),
         ];
+    }
+
+    /**
+     * "Your company has given you a FitAccess membership": the 12-digit
+     * number the employee enters in the member app after signing in.
+     */
+    public static function sendMembershipNumber(Employee $employee): void
+    {
+        $employee->loadMissing('user', 'company');
+        $user = $employee->user;
+        if (!$user?->email || !$employee->card_number) {
+            return;
+        }
+
+        try {
+            \Illuminate\Support\Facades\Mail::to($user->email)->send(new FitAccessNotificationMail(
+                recipientName: $user->name,
+                emailSubject: 'Your FitAccess membership number',
+                heading: \App\Support\CardNumber::format($employee->card_number),
+                message: ($employee->company?->name ?? 'Your company').' has given you a FitAccess membership. '
+                    .'To start: 1) download the FitAccess app, 2) sign in with this email and your password, '
+                    .'3) enter the 12-digit membership number above. Keep it private; you only need to enter it once on your phone.',
+                buttonText: 'Get the FitAccess app',
+                buttonUrl: config('fitaccess.member_app_url'),
+            ));
+        } catch (\Throwable $e) {
+            \Illuminate\Support\Facades\Log::warning('membership_number_mail.failed', ['employee_id' => $employee->id]);
+        }
     }
 }
