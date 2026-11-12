@@ -48,8 +48,11 @@ class AuthController extends Controller
      */
     private const MFA_EXTRA_ROLES = ['company_hr', 'gym_partner', 'employee'];
 
-    /** Partner-app roles whose second step is a code sent to their email. */
-    private const EMAIL_MFA_ROLES = ['gym_partner'];
+    /**
+     * Roles whose second step is a code sent to their email: gym owners
+     * (partner app) and company employees (member app and employee portal).
+     */
+    private const EMAIL_MFA_ROLES = ['gym_partner', 'employee'];
 
     #[OA\Post(
         path: '/auth/login',
@@ -199,7 +202,7 @@ class AuthController extends Controller
         $mfaToken = Str::random(64);
         Cache::put("mfa_pending:{$mfaToken}", $user->id, now()->addMinutes(10));
 
-        // Gym owners (partner app): a 6-digit code to the account's email.
+        // Gym owners and employees: a 6-digit code to the account's email.
         // Sent only after the password was right, so it can't be used to
         // find out which emails are registered.
         if (in_array($user->role, self::EMAIL_MFA_ROLES, true)) {
@@ -338,7 +341,7 @@ class AuthController extends Controller
 
     private function sendLoginCode(User $user, string $mfaToken): void
     {
-        app(OneTimeCodeService::class)->send('login', $this->loginCodeSubject($user, $mfaToken), 'email', $user->email, $user->name, 'signing in to FitAccess Partner');
+        app(OneTimeCodeService::class)->send('login', $this->loginCodeSubject($user, $mfaToken), 'email', $user->email, $user->name, $user->role === 'gym_partner' ? 'signing in to FitAccess Partner' : 'signing in to FitAccess');
     }
 
     /** The code is tied to this one sign-in attempt. */

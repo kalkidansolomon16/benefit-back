@@ -10,7 +10,7 @@ use Illuminate\Support\Facades\Hash;
 use Illuminate\Support\Facades\Mail;
 use Tests\TestCase;
 
-/** Gym owners sign in with password + a code sent to their email. */
+/** Gym owners and employees sign in with password + a code sent to their email. */
 class PartnerEmailMfaTest extends TestCase
 {
     use RefreshDatabase;
@@ -101,6 +101,25 @@ class PartnerEmailMfaTest extends TestCase
 
         $this->postJson('/api/v1/auth/mfa/setup/confirm', ['mfa_token' => $token, 'code' => '123456'])
             ->assertUnprocessable()->assertJsonPath('code', 'use_email_code');
+    }
+
+    public function test_employees_get_an_email_code_too(): void
+    {
+        $company = \App\Models\Company::forceCreate(['name' => 'Ethio Telecom', 'contact_email' => 'hr@et.test', 'contact_person' => 'HR', 'contact_phone' => '1', 'address' => 'a', 'city' => 'Addis Ababa']);
+        $u = User::forceCreate(['name' => 'Abebe Kebede', 'email' => 'abebe@et.test', 'password' => Hash::make(self::PASSWORD), 'role' => 'employee', 'is_active' => true, 'company_id' => $company->id]);
+        \App\Models\Employee::forceCreate(['user_id' => $u->id, 'company_id' => $company->id, 'fan_number' => '1', 'is_enrolled' => true, 'registration_status' => 'approved', 'admin_approval_status' => 'approved']);
+
+        $token = $this->postJson('/api/v1/auth/login', ['email' => 'abebe@et.test', 'password' => self::PASSWORD])
+            ->assertOk()->assertJsonPath('mfa_method', 'email')->assertJsonMissingPath('qr_code')->json('mfa_token');
+
+        $code = null;
+        Mail::assertSent(FitAccessNotificationMail::class, function ($m) use (&$code) {
+            $code = $m->heading;
+
+            return $m->hasTo('abebe@et.test');
+        });
+        $this->postJson('/api/v1/auth/mfa/verify', ['mfa_token' => $token, 'code' => $code, 'device_name' => 'FitAccess · Android'])
+            ->assertOk()->assertJsonPath('user.role', 'employee')->assertJsonStructure(['token', 'refresh_token']);
     }
 
     public function test_admins_keep_the_authenticator(): void
