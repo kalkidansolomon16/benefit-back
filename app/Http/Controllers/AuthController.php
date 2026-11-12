@@ -10,11 +10,13 @@ use App\Models\User;
 use App\Services\RecaptchaService;
 use App\Services\SessionTokenService;
 use App\Services\TelegramService;
+use App\Services\OneTimeCodeService;
 use App\Services\TwoFactorService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\Cache;
+use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Hash;
 use Illuminate\Support\Facades\Mail;
@@ -45,6 +47,9 @@ class AuthController extends Controller
      * Roles that must complete TOTP two-factor authentication to log in.
      */
     private const MFA_EXTRA_ROLES = ['company_hr', 'gym_partner', 'employee'];
+
+    /** Partner-app roles whose second step is a code sent to their email. */
+    private const EMAIL_MFA_ROLES = ['gym_partner'];
 
     #[OA\Post(
         path: '/auth/login',
@@ -194,6 +199,22 @@ class AuthController extends Controller
         $mfaToken = Str::random(64);
         Cache::put("mfa_pending:{$mfaToken}", $user->id, now()->addMinutes(10));
 
+        // Gym owners (partner app): a 6-digit code to the account's email.
+        // Sent only after the password was right, so it can't be used to
+        // find out which emails are registered.
+        if (in_array($user->role, self::EMAIL_MFA_ROLES, true)) {
+            $this->sendLoginCode($user, $mfaToken);
+
+            return response()->json([
+                'mfa_required'   => true,
+                'mfa_method'     => 'email',
+                'mfa_token'      => $mfaToken,
+                'masked_contact' => OneTimeCodeService::mask($user->email),
+                'expires_in'     => OneTimeCodeService::TTL_MINUTES * 60,
+                'message'        => 'We sent a 6-digit code to your email. Enter it to finish signing in.',
+            ]);
+        }
+
         // Already enrolled: skip the QR and ask for the code only
         if ($user->google2fa_enabled && $user->google2fa_secret) {
             return response()->json([
@@ -238,6 +259,10 @@ class AuthController extends Controller
         if (!$user || !$user->google2fa_secret) {
             return response()->json(['message' => 'This login session has expired. Please sign in again.'], 422);
         }
+        if (in_array($user->role, self::EMAIL_MFA_ROLES, true)) {
+            // These accounts confirm with the emailed code (mfa/verify) only.
+            return response()->json(['message' => 'Enter the code we sent to your email.', 'code' => 'use_email_code'], 422);
+        }
 
         $tfa = app(TwoFactorService::class);
         if (!$tfa->verifyKey($user->google2fa_secret, $request->input('code'))) {
@@ -249,6 +274,77 @@ class AuthController extends Controller
         Cache::forget($pendingKey);
 
         return $this->respondWithSession($request, $user);
+    }
+
+    /**
+     * Step 2 for email-code accounts: check the code sent to the account's
+     * email (10 minutes, 5 tries) and issue the session.
+     */
+    public function mfaVerify(Request $request): JsonResponse
+    {
+        $request->validate([
+            'mfa_token' => 'required|string|max:100',
+            'code'      => 'required|digits:6',
+        ]);
+
+        $pendingKey = "mfa_pending:{$request->input('mfa_token')}";
+        $userId     = Cache::get($pendingKey);
+        $user       = $userId ? User::find($userId) : null;
+
+        if (!$user || !$user->is_active) {
+            return response()->json(['message' => 'This sign-in has expired. Please sign in again.', 'code' => 'session_expired'], 422);
+        }
+        if (!in_array($user->role, self::EMAIL_MFA_ROLES, true)) {
+            // Authenticator accounts confirm through mfa/setup/confirm.
+            return $this->mfaSetupConfirm($request);
+        }
+
+        $result = app(OneTimeCodeService::class)->verify('login', $this->loginCodeSubject($user, $request->input('mfa_token')), $request->input('code'));
+        if ($result !== 'ok') {
+            if ($result === 'expired') {
+                Cache::forget($pendingKey);
+            }
+            Log::warning('auth.mfa_email.failed', ['user_id' => $user->id, 'result' => $result]);
+
+            return response()->json([
+                'message' => $result === 'wrong' ? 'That code isn’t right. Check the email and try again.' : 'This code has expired. Sign in again to get a new one.',
+                'code'    => $result === 'wrong' ? 'wrong_code' : 'code_expired',
+            ], 422);
+        }
+
+        Cache::forget($pendingKey);
+
+        return $this->respondWithSession($request, $user);
+    }
+
+    /** POST /auth/mfa/resend {mfa_token}: a new code for the same sign-in. */
+    public function mfaResend(Request $request): JsonResponse
+    {
+        $request->validate(['mfa_token' => 'required|string|max:100']);
+        $userId = Cache::get("mfa_pending:{$request->input('mfa_token')}");
+        $user   = $userId ? User::find($userId) : null;
+
+        if (!$user || !in_array($user->role, self::EMAIL_MFA_ROLES, true)) {
+            return response()->json(['message' => 'This sign-in has expired. Please sign in again.', 'code' => 'session_expired'], 422);
+        }
+
+        $this->sendLoginCode($user, $request->input('mfa_token'));
+
+        return response()->json(['data' => [
+            'masked_contact' => OneTimeCodeService::mask($user->email),
+            'expires_in'     => OneTimeCodeService::TTL_MINUTES * 60,
+        ]]);
+    }
+
+    private function sendLoginCode(User $user, string $mfaToken): void
+    {
+        app(OneTimeCodeService::class)->send('login', $this->loginCodeSubject($user, $mfaToken), 'email', $user->email, $user->name, 'signing in to FitAccess Partner');
+    }
+
+    /** The code is tied to this one sign-in attempt. */
+    private function loginCodeSubject(User $user, string $mfaToken): string
+    {
+        return "user:{$user->id}|".hash('sha256', $mfaToken);
     }
 
     /**
