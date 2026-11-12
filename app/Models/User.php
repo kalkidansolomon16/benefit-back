@@ -3,32 +3,77 @@
 namespace App\Models;
 
 use Illuminate\Database\Eloquent\Factories\HasFactory;
-use Illuminate\Database\Eloquent\Relations\HasOne;
+use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\HasMany;
+use Illuminate\Database\Eloquent\Relations\HasOne;
 use Illuminate\Database\Eloquent\SoftDeletes;
 use Illuminate\Foundation\Auth\User as Authenticatable;
 use Illuminate\Notifications\Notifiable;
+use Laravel\Sanctum\HasApiTokens;
+use Illuminate\Auth\Passwords\CanResetPassword as CanResetPassword;
+use Illuminate\Contracts\Auth\CanResetPassword as CanResetPasswordContract;
 
-class User extends Authenticatable
+class User extends Authenticatable implements CanResetPasswordContract
 {
-    use HasFactory, Notifiable, SoftDeletes;
+    use HasApiTokens, HasFactory, Notifiable, SoftDeletes;
+    use CanResetPassword;
 
     protected $fillable = [
-        'name', 'email', 'password', 'role',
+        'name', 'email', 'password', 'role', 'user_type',
         'fan_number', 'photo_path', 'phone', 'is_active',
+        'must_reset_password', 'password_reset_token', 'password_reset_expires_at',
+        'created_by', 'company_id', 'company_branch_id', 'gym_id',
+        'telegram_chat_id', 'telegram_link_token', 'telegram_link_expires_at',
     ];
 
-    protected $hidden = ['password', 'remember_token'];
+    protected static function boot(): void
+    {
+        parent::boot();
+
+        static::creating(function (User $user) {
+            if (empty($user->user_type)) {
+                $user->user_type = self::resolveUserType($user->role);
+            }
+        });
+
+        static::updating(function (User $user) {
+            if ($user->isDirty('role')) {
+                $user->user_type = self::resolveUserType($user->role);
+            }
+        });
+    }
+
+    public static function resolveUserType(?string $role): ?string
+    {
+        return match(true) {
+            $role === 'employee' => 'employee',
+            in_array($role, ['company_hr', 'company_finance', 'company_ceo', 'co_hr', 'co_executive', 'co_finance']) => 'company',
+            in_array($role, ['gym_partner', 'gym_staff', 'gym_hr', 'gym_executive', 'gym_finance']) => 'gym',
+            default => null,
+        };
+    }
+
+    protected $hidden = [
+        'password', 'remember_token', 'password_reset_token',
+        'google2fa_secret', 'google2fa_recovery_codes',
+    ];
 
     protected function casts(): array
     {
         return [
-            'password'  => 'hashed',
-            'is_active' => 'boolean',
+            'password'                   => 'hashed',
+            'is_active'                  => 'boolean',
+            'must_reset_password'        => 'boolean',
+            'password_reset_expires_at'  => 'datetime',
+            'telegram_link_expires_at'   => 'datetime',
+            'google2fa_secret'           => 'encrypted',
+            'google2fa_enabled'          => 'boolean',
+            'google2fa_recovery_codes'   => 'encrypted:array',
         ];
     }
 
-    // Relationships
+    /* ── Relationships ─────────────────────────────────────────── */
+
     public function employee(): HasOne
     {
         return $this->hasOne(Employee::class);
@@ -44,10 +89,208 @@ class User extends Authenticatable
         return $this->hasMany(AuditLog::class);
     }
 
-    // Helpers
-    public function isSuperAdmin(): bool  { return $this->role === 'super_admin'; }
-    public function isAdmin(): bool       { return $this->role === 'fitaccess_admin'; }
-    public function isHR(): bool          { return $this->role === 'company_hr'; }
-    public function isEmployee(): bool    { return $this->role === 'employee'; }
-    public function isGymStaff(): bool    { return $this->role === 'gym_staff'; }
+    public function creator(): BelongsTo
+    {
+        return $this->belongsTo(User::class, 'created_by');
+    }
+
+    public function company(): BelongsTo
+    {
+        return $this->belongsTo(Company::class);
+    }
+
+    public function gym(): BelongsTo
+    {
+        return $this->belongsTo(Gym::class);
+    }
+
+    public function companyBranch(): BelongsTo
+    {
+        return $this->belongsTo(CompanyBranch::class);
+    }
+
+    /**
+     * Forget the authenticator: the next login shows a fresh QR code.
+     * Also signs the user out everywhere so the reset takes effect at once.
+     */
+    public function resetTwoFactor(): void
+    {
+        $this->forceFill([
+            'google2fa_secret'         => null,
+            'google2fa_enabled'        => false,
+            'google2fa_recovery_codes' => null,
+        ])->save();
+
+        $this->tokens()->delete();
+    }
+
+    /** A company_hr login that belongs to one branch (not the head office) */
+    public function isCompanyBranchLogin(): bool
+    {
+        return $this->role === 'company_hr' && !empty($this->company_branch_id);
+    }
+
+    public function userPermissions(): HasMany
+    {
+        return $this->hasMany(UserPermission::class);
+    }
+
+    /* ── Role helpers ──────────────────────────────────────────── */
+
+    public function isSuperAdmin(): bool { return $this->role === 'super_admin'; }
+    public function isAdmin(): bool
+    {
+        return in_array($this->role, ['super_admin', 'fitaccess_admin', 'admin_finance', 'admin_support'], true)
+            || in_array($this->role, self::dynamicAdminSubRoles(), true);
+    }
+    public function isHR(): bool         { return in_array($this->role, ['company_hr', 'company_finance', 'company_ceo']); }
+    public function isEmployee(): bool   { return $this->role === 'employee'; }
+    public function isGymUser(): bool    { return in_array($this->role, ['gym_partner', 'gym_staff']); }
+
+    /** All admin-panel roles */
+    public const ADMIN_ROLES = ['super_admin', 'fitaccess_admin', 'admin_finance', 'admin_support'];
+    /** Roles that admin can create (sub-roles) */
+    public const ADMIN_SUB_ROLES = ['admin_finance', 'admin_support'];
+
+    /** Dynamically fetch all admin sub-role names from the roles table (excludes top-level admin). */
+    public static function dynamicAdminSubRoles(): array
+    {
+        return \App\Models\Role::where('scope', 'admin')
+            ->where('name', '!=', 'fitaccess_admin')
+            ->pluck('name')
+            ->toArray();
+    }
+    /**
+     * Every role an admin team member can have: the built-in Finance / Support
+     * roles plus any custom admin roles created on the Roles page.
+     */
+    public static function adminTeamRoles(): array
+    {
+        return array_values(array_diff(
+            array_unique(array_merge(self::ADMIN_SUB_ROLES, self::dynamicAdminSubRoles())),
+            ['fitaccess_admin', 'super_admin']
+        ));
+    }
+
+    /** Roles HR can create */
+    public const COMPANY_SUB_ROLES = ['co_hr', 'co_executive', 'co_finance', 'company_finance', 'company_ceo'];
+    /** Roles gym owner can create */
+    public const GYM_SUB_ROLES = ['gym_hr', 'gym_executive', 'gym_finance'];
+
+    /**
+     * The 12-digit FitAccess number: the employee card number for company
+     * members, users.member_number for individual members.
+     */
+    public function memberNumber(): ?string
+    {
+        return $this->employee?->card_number ?? $this->member_number;
+    }
+
+    /** Gives an individual member a number the first time they get a plan. */
+    public function ensureMemberNumber(): ?string
+    {
+        if ($this->employee) {
+            return $this->employee->card_number;
+        }
+        if (!$this->member_number) {
+            $this->forceFill(['member_number' => \App\Support\CardNumber::generate()])->save();
+        }
+
+        return $this->member_number;
+    }
+
+    /** super_admin and fitaccess_admin: every admin permission. */
+    public function isFullAdmin(): bool
+    {
+        return in_array($this->role, ['super_admin', 'fitaccess_admin'], true);
+    }
+
+    /**
+     * Which part of the platform this account belongs to:
+     * 'admin' | 'company' | 'gym' | 'employee' | 'member', or null if unknown.
+     * Custom roles take the scope they were created with (roles.scope).
+     * Used by the 'area:' route middleware.
+     */
+    public function area(): ?string
+    {
+        $role = (string) $this->role;
+
+        return match (true) {
+            in_array($role, self::ADMIN_ROLES, true)                                  => 'admin',
+            in_array($role, ['company_hr', ...self::COMPANY_SUB_ROLES], true)          => 'company',
+            in_array($role, ['gym_partner', 'gym_staff', ...self::GYM_SUB_ROLES], true) => 'gym',
+            $role === 'employee'                                                       => 'employee',
+            $role === 'member'                                                         => 'member',
+            default => \App\Models\Role::where('name', $role)->value('scope'),
+        };
+    }
+
+    /* ── Permission system ─────────────────────────────────────── */
+
+    /**
+     * Check if user has a given permission.
+     * - super_admin always returns true.
+     * - fitaccess_admin gets all admin permissions except permissions.manage restriction.
+     * - Others: check user_permissions override first, then role_permissions default.
+     */
+    public function hasPermission(string $permission): bool
+    {
+        if (in_array($this->role, ['super_admin', 'fitaccess_admin'])) {
+            return true;
+        }
+
+        // Primary company HR always has full access to company scope
+        if ($this->role === 'company_hr' && str_starts_with($permission, 'co.')) {
+            return true;
+        }
+
+        // Primary gym partner always has full access to gym scope
+        if ($this->role === 'gym_partner' && str_starts_with($permission, 'gym.')) {
+            return true;
+        }
+
+        // Check per-user override
+        $override = UserPermission::where('user_id', $this->id)
+            ->where('permission_name', $permission)
+            ->first();
+
+        if ($override !== null) {
+            return $override->granted;
+        }
+
+        // Check role default
+        return RolePermission::where('role', $this->role)
+            ->where('permission_name', $permission)
+            ->exists();
+    }
+
+    /**
+     * Return all effective permissions for this user.
+     * Merges role defaults with user-specific overrides.
+     */
+    public function effectivePermissions(): array
+    {
+        if (in_array($this->role, ['super_admin', 'fitaccess_admin'])) {
+            return Permission::pluck('name')->toArray();
+        }
+
+        // Start with role defaults
+        $rolePerms = RolePermission::where('role', $this->role)
+            ->pluck('permission_name')
+            ->toArray();
+
+        $perms = array_flip($rolePerms); // name => true
+
+        // Apply user overrides
+        $overrides = UserPermission::where('user_id', $this->id)->get();
+        foreach ($overrides as $o) {
+            if ($o->granted) {
+                $perms[$o->permission_name] = true;
+            } else {
+                unset($perms[$o->permission_name]);
+            }
+        }
+
+        return array_keys($perms);
+    }
 }

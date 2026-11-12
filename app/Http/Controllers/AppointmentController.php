@@ -16,7 +16,7 @@ class AppointmentController extends Controller
             ->when($request->status, fn($q) => $q->where('status', $request->status))
             ->when($request->date, fn($q) => $q->whereDate('appointment_at', $request->date))
             ->orderBy('appointment_at')
-            ->paginate(15);
+            ->paginate(10);
 
         return response()->json($appointments);
     }
@@ -35,7 +35,18 @@ class AppointmentController extends Controller
 
     public function update(Request $request, Appointment $appointment): JsonResponse
     {
-        $appointment->update($request->all());
+        $validated = $request->validate([
+            'employee_id'    => 'sometimes|required|exists:employees,id',
+            'doctor_name'    => 'sometimes|nullable|string|max:255',
+            'clinic_name'    => 'sometimes|nullable|string|max:255',
+            'specialty'      => 'sometimes|nullable|string|max:100',
+            'appointment_at' => 'sometimes|required|date|after:now',
+            'is_online'      => 'sometimes|boolean',
+            'meeting_link'   => 'sometimes|nullable|url',
+            'notes'          => 'sometimes|nullable|string',
+        ]);
+
+        $appointment->update($validated);
         return response()->json($appointment);
     }
 

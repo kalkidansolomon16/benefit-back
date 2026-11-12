@@ -4,53 +4,287 @@ namespace App\Http\Controllers;
 
 use App\Http\Requests\StoreCompanyRequest;
 use App\Http\Resources\CompanyResource;
+use App\Models\AuditLog;
 use App\Models\Company;
+use App\Models\User;
+use App\Services\TelegramService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Http\Resources\Json\AnonymousResourceCollection;
+use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Hash;
+use Illuminate\Support\Facades\Storage;
+use Illuminate\Support\Str;
 
 class CompanyController extends Controller
 {
+    /** Public: all active companies for employee self-signup dropdown */
+    public function publicList(): JsonResponse
+    {
+        $companies = Company::where('is_active', true)
+            ->orderBy('name')
+            ->get(['id', 'name', 'industry', 'city']);
+
+        return response()->json(['data' => $companies]);
+    }
+
+    /** Public: branches of one company, for the employee sign-up dropdown */
+    public function publicBranches(Company $company): JsonResponse
+    {
+        $branches = $company->branches()
+            ->where('is_active', true)
+            ->orderBy('name')
+            ->get(['id', 'name', 'city']);
+
+        return response()->json(['data' => $branches]);
+    }
+
     public function index(Request $request): AnonymousResourceCollection
     {
         $companies = Company::query()
             ->when($request->search, fn($q) => $q->where('name', 'like', "%{$request->search}%"))
-            ->when($request->tier, fn($q) => $q->where('tier', $request->tier))
-            ->when($request->is_active !== null, fn($q) => $q->where('is_active', $request->boolean('is_active')))
-            ->withCount('employees')
+            ->when($request->tier, fn($q) => $q->whereIn('tier', in_array($request->tier, ['premium', 'platinum'], true) ? ['premium', 'platinum'] : [$request->tier]))
+            ->when($request->license_status, fn($q) => $q->where('business_license_status', $request->license_status))
+            ->when(in_array($request->is_active, ['true', 'false'], true), fn($q) => $q->where('is_active', $request->is_active === 'true'))
+            ->withCount([
+                'employees',
+                'employees as enrolled_employees_count' => fn($q) => $q->where('is_enrolled', true),
+            ])
             ->latest()
-            ->paginate(15);
+            ->paginate(10);
 
         return CompanyResource::collection($companies);
     }
 
+    /**
+     * Admin-only: create a company + its HR user account in one step.
+     * Business licence is optional here (admin may upload later).
+     */
+    public function adminCreate(Request $request): JsonResponse
+    {
+        $request->validate([
+            'name'          => 'required|string|max:255',
+            'industry'      => 'required|string|max:100',
+            'tier'          => 'required|in:basic,basic_plus,platinum',
+            'contact_person'=> 'required|string|max:255',
+            'contact_email' => 'required|email|unique:companies,contact_email|unique:users,email',
+            'contact_phone' => 'required|string|max:20',
+            'city'          => 'nullable|string|max:100',
+            'tin_number'    => 'nullable|string|max:50',
+            'is_active'                => 'boolean',
+            'preferred_payment_method' => 'nullable|in:cbe_transfer,telebirr_enterprise,awash_bank,chapa,cash,other',
+            'business_license'         => 'nullable|file|mimes:pdf,jpg,jpeg,png|max:5120',
+        ], [
+            'contact_email.unique' => 'This email is already registered.',
+        ]);
+
+        $licensePath = null;
+        if ($request->hasFile('business_license')) {
+            $licensePath = $request->file('business_license')->store('licenses', 'public');
+        }
+
+        try {
+            return DB::transaction(function () use ($request, $licensePath): JsonResponse {
+                $isActive = $request->boolean('is_active', true);
+
+                $companyData = [
+                    'name'                     => $request->name,
+                    'industry'                 => $request->industry,
+                    'tier'                     => $request->tier,
+                    'contact_person'           => $request->contact_person,
+                    'contact_email'            => $request->contact_email,
+                    'contact_phone'            => $request->contact_phone,
+                    'city'                     => $request->city ?? 'Addis Ababa',
+                    'tin_number'               => $request->tin_number,
+                    'is_active'                => $isActive,
+                    'preferred_payment_method' => $request->preferred_payment_method,
+                ];
+
+                // Only set license fields when a file was actually uploaded
+                if ($licensePath) {
+                    $companyData['business_license_path']   = $licensePath;
+                    $companyData['business_license_status'] = 'pending';
+                }
+
+                $company = Company::create($companyData);
+
+                $tempPassword = Str::password(14);
+
+                $user = User::create([
+                    'name'                => $request->contact_person,
+                    'email'               => $request->contact_email,
+                    'password'            => Hash::make($tempPassword),
+                    'role'                => 'company_hr',
+                    'phone'               => $request->contact_phone,
+                    'is_active'           => $isActive,
+                    'must_reset_password' => true,
+                ]);
+
+                AuditLog::record('created', $company);
+                return response()->json([
+                    'message'       => "Company '{$company->name}' registered and HR account created.",
+                    'company'       => new CompanyResource($company),
+                    'hr_email'      => $user->email,
+                    'temp_password' => $tempPassword,
+                ], 201);
+            });
+        } catch (\Throwable $e) {
+            if ($licensePath) Storage::disk('public')->delete($licensePath);
+            throw $e;
+        }
+    }
+
     public function store(StoreCompanyRequest $request): JsonResponse
     {
-        $company = Company::create($request->validated());
+        $data = $request->validated();
+
+        // Handle business licence upload
+        if ($request->hasFile('business_license')) {
+            $data['business_license_path'] = $request->file('business_license')
+                ->store('licenses', 'public');
+            $data['business_license_status'] = 'pending';
+        }
+
+        // Remove the file key — not a DB column
+        unset($data['business_license']);
+
+        $company = Company::create($data);
+        AuditLog::record('created', $company);
+
         return response()->json(new CompanyResource($company), 201);
     }
 
     public function show(Company $company): CompanyResource
     {
-        $company->load(['employees.user', 'activeSubscription.plan', 'invoices' => fn($q) => $q->latest()->limit(5)]);
+        $company->load([
+            'employees.user',
+            'employees.activeMembership',
+            'activeSubscription.plan',
+            'invoices' => fn($q) => $q->latest()->limit(5),
+        ]);
         return new CompanyResource($company);
     }
 
     public function update(StoreCompanyRequest $request, Company $company): CompanyResource
     {
-        $company->update($request->validated());
+        $data = $request->validated();
+
+        // Handle business licence replacement
+        if ($request->hasFile('business_license')) {
+            // Delete the old file if it exists
+            if ($company->business_license_path) {
+                Storage::disk('public')->delete($company->business_license_path);
+            }
+
+            $data['business_license_path']   = $request->file('business_license')
+                ->store('licenses', 'public');
+            $data['business_license_status'] = 'pending'; // reset to pending on re-upload
+        }
+
+        unset($data['business_license']);
+
+        $company->update($data);
+        $old = $company->only(array_keys($data));
+        $company->update($data);
+        AuditLog::record('updated', $company, $old, $data);
+
         return new CompanyResource($company);
     }
 
     public function destroy(Company $company): JsonResponse
     {
+        // Clean up licence file when company is deleted
+        if ($company->business_license_path) {
+            Storage::disk('public')->delete($company->business_license_path);
+        }
+
+        AuditLog::record('deleted', $company);
         $company->delete();
+
         return response()->json(['message' => 'Company deleted.']);
     }
 
     public function toggleActive(Company $company): JsonResponse
     {
-        $company->update(['is_active' => !$company->is_active]);
+        $newState = !$company->is_active;
+        $company->update(['is_active' => $newState]);
+
+        // Keep the HR user account in sync so they can (or cannot) log in
+        $company->setAccountsActive($newState);
+
+        AuditLog::record('updated', $company, ['is_active' => !$newState], ['is_active' => $newState]);
         return response()->json(['is_active' => $company->is_active]);
+    }
+
+    /**
+     * Admin-only: approve or reject a company's business licence.
+     * Approving also activates both the company record and the HR user account.
+     */
+    public function updateLicenseStatus(Request $request, Company $company): JsonResponse
+    {
+        $request->validate([
+            'status' => 'required|in:approved,rejected,expired',
+        ]);
+
+        $isApproved = $request->status === 'approved';
+
+        $company->update([
+            'business_license_status' => $request->status,
+            // Auto-activate the company when licence is approved
+            'is_active' => $isApproved ? true : $company->is_active,
+        ]);
+
+        // Activate (or keep deactivated) the HR user so they can log in
+        if ($isApproved) {
+            $company->setAccountsActive(true);
+        }
+
+        // Telegram + email notification (wrapped so failures never break the response)
+        $hrUser = $company->hrUser;
+        $reason = $request->reason ?? null;
+        if ($hrUser) {
+            // Email first — own try-catch so Telegram failure can't block it
+            if ($hrUser->email) {
+                try {
+                    if ($isApproved) {
+                        \Illuminate\Support\Facades\Mail::to($hrUser->email)
+                            ->send(new \App\Mail\AccountApprovedMail($hrUser));
+                    } else {
+                        \Illuminate\Support\Facades\Mail::to($hrUser->email)->send(
+                            new \App\Mail\FitAccessNotificationMail(
+                                recipientName: $hrUser->name,
+                                emailSubject:  'Your FitAccess Company Registration Was Not Approved',
+                                heading:       'Business Licence Not Approved',
+                                message:       "We regret to inform you that your company registration for {$company->name} was not approved."
+                                              . ($reason ? "\n\nReason: {$reason}" : '')
+                                              . "\n\nYou may re-apply with the correct documents or contact FitAccess support.",
+                                buttonText:    'Contact Support',
+                                color:         '#ef4444',
+                            )
+                        );
+                    }
+                } catch (\Throwable $e) {
+                    \Illuminate\Support\Facades\Log::error('Company licence email failed: ' . $e->getMessage());
+                }
+            }
+            // Telegram separately
+            try {
+                $telegram = app(TelegramService::class);
+                if ($isApproved) {
+                    $telegram->notifyUserApproved($hrUser, 'company');
+                } else {
+                    $telegram->notifyUserRejected($hrUser, 'company', $reason);
+                }
+            } catch (\Throwable $e) {
+                \Illuminate\Support\Facades\Log::error('Company licence Telegram failed: ' . $e->getMessage());
+            }
+        }
+
+        AuditLog::record('updated', $company, ['business_license_status' => $company->getOriginal('business_license_status')], ['business_license_status' => $request->status]);
+        return response()->json([
+            'message'                 => "Business licence marked as {$request->status}.",
+            'business_license_status' => $company->business_license_status,
+            'is_active'               => $company->is_active,
+        ]);
     }
 }
