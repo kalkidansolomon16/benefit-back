@@ -43,6 +43,9 @@ Route::prefix('v1')->group(function () {
     Route::post('auth/mfa/setup/confirm', [AuthController::class, 'mfaSetupConfirm'])->middleware('throttle:login');
     Route::post('auth/mfa/verify',        [AuthController::class, 'mfaVerify'])->middleware('throttle:login');
     Route::post('auth/mfa/resend',        [AuthController::class, 'mfaResend'])->middleware('throttle:3,10');
+    Route::post('auth/signup',            [AuthController::class, 'signup'])->middleware('throttle:register');
+    Route::post('auth/signup/verify',     [AuthController::class, 'signupVerify'])->middleware('throttle:login');
+    Route::post('auth/signup/resend',     [AuthController::class, 'signupResend'])->middleware('throttle:3,10');
     Route::post('auth/register/company',  [AuthController::class, 'registerCompany'])->middleware('throttle:register');
     Route::post('auth/register/employee', [AuthController::class, 'registerEmployee'])->middleware('throttle:register');
     Route::post('auth/register/partner',  [AuthController::class, 'registerPartner'])->middleware('throttle:register');

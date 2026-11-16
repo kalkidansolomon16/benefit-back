@@ -9,9 +9,9 @@ use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Log;
 
 /**
- * First sign-in on a phone: after the password and the email code, the
- * employee enters the 12-digit membership number their company's package
- * emailed them. The app asks once per phone.
+ * The employee enters the 12-digit membership number their company's
+ * package emailed them (Home, until the card is active). Stored on the
+ * employee (card_activated_at), so it's asked once per employee.
  */
 class MembershipActivationController extends Controller
 {
@@ -48,7 +48,11 @@ class MembershipActivationController extends Controller
         }
 
         Cache::forget($key);
+        if (!$user->employee->card_activated_at) {
+            $user->employee->forceFill(['card_activated_at' => now()])->save();
+            \App\Models\AuditLog::record('card_activated', $user->employee);
+        }
 
-        return response()->json(['data' => ['member_number' => $mine, 'company_name' => $user->employee->company?->name]]);
+        return response()->json(['data' => ['member_number' => $mine, 'company_name' => $user->employee->company?->name, 'card_activated' => true]]);
     }
 }

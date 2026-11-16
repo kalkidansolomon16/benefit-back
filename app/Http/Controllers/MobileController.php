@@ -164,6 +164,14 @@ class MobileController extends Controller
             }
         }
 
+        // Employees activate their card with the emailed 12-digit number first.
+        if ($user->employee && $user->employee->card_activated_at === null) {
+            return response()->json([
+                'message' => 'Enter your 12-digit membership number on Home to activate your card first.',
+                'code'    => 'card_not_activated',
+            ], 403);
+        }
+
         // v2: optionally require a submitted selfie before any code is issued.
         if (config('fitaccess.require_verification')
             && !in_array(app(\App\Services\VerificationService::class)->statusFor($user), ['pending', 'verified'], true)) {
@@ -209,6 +217,8 @@ class MobileController extends Controller
                 'verification_status' => $verifications->statusFor($user),
                 // Whether check-in codes need a verified photo (REQUIRE_VERIFICATION).
                 'verification_required' => (bool) config('fitaccess.require_verification'),
+                // Employees enter their 12-digit number once (Home) to activate the card.
+                'card_activated' => $user->employee ? $user->employee->card_activated_at !== null : true,
                 'verification_rejection_reason' => $latestVerification?->status === 'rejected' ? $latestVerification->rejection_reason : null,
                 'plan_name'      => $employee?->activeMembership?->plan?->name,
                 'plan_tier'      => $employee?->activeMembership?->plan?->tier,

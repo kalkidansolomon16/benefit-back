@@ -37,6 +37,7 @@ class Employee extends Model
     }
 
     protected $casts = [
+        'card_activated_at' => 'datetime',
         'show_in_gym_list' => 'boolean',
         'is_enrolled'  => 'boolean',
         'enrolled_at'  => 'datetime',

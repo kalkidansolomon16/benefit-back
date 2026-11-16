@@ -320,6 +320,100 @@ class AuthController extends Controller
         return $this->respondWithSession($request, $user);
     }
 
+    // ── Employee sign-up in the member app ─────────────────────────────────
+    //
+    // Employees sign up with the email their company registered and a
+    // password. HR already created that account (temporary password, company,
+    // staff ID), so no company details are asked: a code sent to the email
+    // proves it's theirs, then their password replaces the temporary one.
+
+    /** POST /auth/signup {email, password, password_confirmation} */
+    public function signup(Request $request): JsonResponse
+    {
+        $request->validate([
+            'email'    => 'required|email|max:255',
+            'password' => ['required', 'string', 'confirmed', new \App\Rules\StrongPassword()],
+        ]);
+
+        $user = User::whereRaw('LOWER(email) = ?', [strtolower(trim($request->email))])->where('role', 'employee')->first();
+
+        if (!$user) {
+            return response()->json([
+                'message' => 'We couldn’t find a FitAccess membership for this email. Use the email your company registered, or ask your HR.',
+                'code'    => 'not_registered',
+            ], 404);
+        }
+        if (!$user->must_reset_password) {
+            return response()->json(['message' => 'You already have an account. Sign in instead.', 'code' => 'already_registered'], 409);
+        }
+        if (!$user->is_active) {
+            return response()->json([
+                'message' => 'Your membership is waiting for approval by your company and FitAccess. You’ll get an email when you can sign up.',
+                'code'    => 'pending_approval',
+            ], 403);
+        }
+
+        $token = Str::random(64);
+        Cache::put("signup_pending:{$token}", ['user_id' => $user->id, 'password' => Hash::make($request->password)], now()->addMinutes(OneTimeCodeService::TTL_MINUTES));
+        app(OneTimeCodeService::class)->send('signup', $this->loginCodeSubject($user, $token), 'email', $user->email, $user->name, 'creating your FitAccess account');
+
+        return response()->json([
+            'mfa_required'   => true,
+            'mfa_method'     => 'email',
+            'mfa_token'      => $token,
+            'masked_contact' => OneTimeCodeService::mask($user->email),
+            'expires_in'     => OneTimeCodeService::TTL_MINUTES * 60,
+            'message'        => 'We sent a 6-digit code to your email. Enter it to finish creating your account.',
+        ]);
+    }
+
+    /** POST /auth/signup/verify {mfa_token, code}: sets the password, signs in. */
+    public function signupVerify(Request $request): JsonResponse
+    {
+        $request->validate(['mfa_token' => 'required|string|max:100', 'code' => 'required|digits:6']);
+        $key     = "signup_pending:{$request->input('mfa_token')}";
+        $pending = Cache::get($key);
+        $user    = $pending ? User::find($pending['user_id']) : null;
+
+        if (!$user || !$user->is_active || !$user->must_reset_password) {
+            return response()->json(['message' => 'This sign-up has expired. Please start again.', 'code' => 'session_expired'], 422);
+        }
+
+        $result = app(OneTimeCodeService::class)->verify('signup', $this->loginCodeSubject($user, $request->input('mfa_token')), $request->input('code'));
+        if ($result !== 'ok') {
+            if ($result === 'expired') {
+                Cache::forget($key);
+            }
+
+            return response()->json([
+                'message' => $result === 'wrong' ? 'That code isn’t right. Check the email and try again.' : 'This code has expired. Start again to get a new one.',
+                'code'    => $result === 'wrong' ? 'wrong_code' : 'code_expired',
+            ], 422);
+        }
+
+        Cache::forget($key);
+        $user->forceFill(['password' => $pending['password'], 'must_reset_password' => false])->save();
+        // The temporary password can't be used any more; end anything opened with it.
+        app(SessionTokenService::class)->revokeAll($user);
+        \App\Models\AuditLog::record('employee_signed_up', $user);
+
+        return $this->respondWithSession($request, $user);
+    }
+
+    /** POST /auth/signup/resend {mfa_token} */
+    public function signupResend(Request $request): JsonResponse
+    {
+        $request->validate(['mfa_token' => 'required|string|max:100']);
+        $pending = Cache::get("signup_pending:{$request->input('mfa_token')}");
+        $user    = $pending ? User::find($pending['user_id']) : null;
+        if (!$user) {
+            return response()->json(['message' => 'This sign-up has expired. Please start again.', 'code' => 'session_expired'], 422);
+        }
+        app(OneTimeCodeService::class)->send('signup', $this->loginCodeSubject($user, $request->input('mfa_token')), 'email', $user->email, $user->name, 'creating your FitAccess account');
+
+        return response()->json(['data' => ['masked_contact' => OneTimeCodeService::mask($user->email), 'expires_in' => OneTimeCodeService::TTL_MINUTES * 60]]);
+    }
+
     /** POST /auth/mfa/resend {mfa_token}: a new code for the same sign-in. */
     public function mfaResend(Request $request): JsonResponse
     {
