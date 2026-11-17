@@ -51,8 +51,13 @@ class PartnerEmailMfaTest extends TestCase
     public function test_the_mobile_path_checks_the_same_code(): void
     {
         $token = $this->login()->json('mfa_token');
-        $this->postJson('/api/v1/auth/mfa/verify', ['mfa_token' => $token, 'code' => $this->lastCode()])
+        $code = $this->lastCode();
+        $this->postJson('/api/v1/auth/mfa/verify', ['mfa_token' => $token, 'code' => $code === '000000' ? '111111' : '000000'])
+            ->assertUnprocessable()->assertJsonPath('code', 'wrong_code');
+        $this->postJson('/api/v1/auth/mfa/verify', ['mfa_token' => $token, 'code' => $code])
             ->assertOk()->assertJsonStructure(['token']);
+        $this->postJson('/api/v1/auth/mfa/verify', ['mfa_token' => $token, 'code' => $code])
+            ->assertUnprocessable()->assertJsonPath('code', 'session_expired');
     }
 
     public function test_wrong_password_sends_nothing(): void

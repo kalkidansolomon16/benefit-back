@@ -341,7 +341,17 @@ class AuthController extends Controller
      */
     public function mfaVerify(Request $request): JsonResponse
     {
-        return $this->mfaSetupConfirm($request);
+        $pendingKey = "mfa_pending:{$request->input('mfa_token')}";
+        $response   = $this->mfaSetupConfirm($request);
+
+        // The apps also read a machine code: try again, or start over.
+        if ($response->getStatusCode() === 422) {
+            $body = $response->getData(true);
+            $body['code'] ??= Cache::has($pendingKey) ? 'wrong_code' : 'session_expired';
+            $response->setData($body);
+        }
+
+        return $response;
     }
 
     // ── Sign-up in the member app ──────────────────────────────────────────
