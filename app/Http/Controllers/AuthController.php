@@ -335,9 +335,32 @@ class AuthController extends Controller
         $request->validate([
             'email'    => 'required|email:rfc|max:255',
             'password' => ['required', 'string', 'confirmed', new \App\Rules\StrongPassword()],
+            'first_name' => ['required', 'string', 'max:60', 'regex:/^[\pL\pM][\pL\pM\s\'.-]*$/u'],
+            'last_name'  => ['required', 'string', 'max:60', 'regex:/^[\pL\pM][\pL\pM\s\'.-]*$/u'],
+            'phone'      => ['required', 'string', 'max:20'],
+        ], [
+            'first_name.regex' => 'Use letters only.',
+            'last_name.regex'  => 'Use letters only.',
         ]);
         $email = strtolower(trim($request->email));
         $user  = User::whereRaw('LOWER(email) = ?', [$email])->first();
+
+        $phone = self::ethiopianMobile($request->phone);
+        if (!$phone) {
+            return response()->json([
+                'message' => 'Enter an Ethiopian mobile number, like +251 911 234 412.',
+                'errors'  => ['phone' => ['Enter an Ethiopian mobile number, like +251 911 234 412.']],
+            ], 422);
+        }
+        $phoneTaken = User::whereIn('phone', [$phone, '0'.substr($phone, 4)])
+            ->when($user, fn ($q) => $q->where('id', '!=', $user->id))
+            ->exists();
+        if ($phoneTaken) {
+            return response()->json([
+                'message' => 'This phone number is already used by another account.',
+                'errors'  => ['phone' => ['This phone number is already used by another account.']],
+            ], 422);
+        }
 
         if ($user) {
             $unusedHrAccount = $user->role === 'employee' && $user->must_reset_password;
@@ -357,6 +380,8 @@ class AuthController extends Controller
             'user_id'  => $user?->id,
             'email'    => $email,
             'password' => Hash::make($request->password),
+            'name'     => trim(preg_replace('/\s+/', ' ', trim($request->first_name).' '.trim($request->last_name))),
+            'phone'    => $phone,
         ], now()->addMinutes(OneTimeCodeService::TTL_MINUTES));
         $this->sendSignupCode($email, $user?->name, $token);
 
@@ -399,7 +424,13 @@ class AuthController extends Controller
             if (!$user || !$user->is_active || !$user->must_reset_password) {
                 return response()->json(['message' => 'This account was set up in the meantime. Sign in instead.', 'code' => 'already_registered'], 409);
             }
-            $user->forceFill(['password' => $pending['password'], 'must_reset_password' => false])->save();
+            // The name stays as the company registered it (corrections go through HR);
+            // the phone fills in only if HR left it empty.
+            $user->forceFill([
+                'password'            => $pending['password'],
+                'must_reset_password' => false,
+                'phone'               => $user->phone ?: $pending['phone'],
+            ])->save();
             // The temporary password can't be used any more; end anything opened with it.
             app(SessionTokenService::class)->revokeAll($user);
         } else {
@@ -408,8 +439,9 @@ class AuthController extends Controller
             }
             // A plain account: no company membership until the number is entered.
             $user = User::forceCreate([
-                'name'      => \Illuminate\Support\Str::of(\Illuminate\Support\Str::before($pending['email'], '@'))->replace(['.', '_', '-'], ' ')->title()->limit(60, '')->value(),
+                'name'      => $pending['name'],
                 'email'     => $pending['email'],
+                'phone'     => $pending['phone'],
                 'password'  => $pending['password'],
                 'role'      => 'member',
                 'is_active' => true,
@@ -438,6 +470,17 @@ class AuthController extends Controller
     private function sendSignupCode(string $email, ?string $name, string $token): void
     {
         app(OneTimeCodeService::class)->send('signup', $this->signupSubject($email, $token), 'email', $email, $name ?? 'there', 'creating your FitAccess account');
+    }
+
+    /** "0911 234 412" / "+251911234412" → "+251911234412"; null if it isn't an Ethiopian mobile. */
+    private static function ethiopianMobile(string $raw): ?string
+    {
+        $digits = preg_replace('/[^\d+]/', '', $raw);
+        if (preg_match('/^(?:\+251|251|0)([79]\d{8})$/', $digits, $m)) {
+            return '+251'.$m[1];
+        }
+
+        return null;
     }
 
     /** The code is tied to this email and this one sign-up attempt. */

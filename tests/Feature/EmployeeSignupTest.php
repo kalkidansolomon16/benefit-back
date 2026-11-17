@@ -56,6 +56,40 @@ class EmployeeSignupTest extends TestCase
         $this->signup('abebe@ethiotelecom.test')->assertStatus(409)->assertJsonPath('code', 'already_registered');
     }
 
+    public function test_sign_up_saves_the_name_and_phone(): void
+    {
+        $token = $this->signup('selam@gmail.test', ['first_name' => ' Selam ', 'last_name' => 'Tesfaye', 'phone' => '0911 234 412'])->assertOk()->json('mfa_token');
+        $this->postJson('/api/v1/auth/signup/verify', ['mfa_token' => $token, 'code' => $this->codeTo('selam@gmail.test')])->assertOk();
+
+        $u = User::where('email', 'selam@gmail.test')->firstOrFail();
+        $this->assertSame('Selam Tesfaye', $u->name);
+        $this->assertSame('+251911234412', $u->phone);
+
+        // No membership yet, so no member number to show.
+        Sanctum::actingAs($u);
+        $this->getJson('/api/v1/mobile/profile')->assertJsonPath('data.member_number', null)->assertJsonPath('data.card_number', null);
+    }
+
+    public function test_sign_up_needs_a_name_and_a_free_ethiopian_mobile(): void
+    {
+        $this->signup('a@gmail.test', ['first_name' => '', 'last_name' => '<b>'])->assertUnprocessable()->assertJsonValidationErrors(['first_name', 'last_name']);
+        $this->signup('a@gmail.test', ['phone' => '12345'])->assertUnprocessable()->assertJsonValidationErrors(['phone']);
+
+        User::forceCreate(['name' => 'Other', 'email' => 'other@x.test', 'password' => 'x', 'role' => 'member', 'is_active' => true, 'phone' => '+251911234412']);
+        $this->signup('a@gmail.test', ['phone' => '0911234412'])->assertUnprocessable()->assertJsonValidationErrors(['phone']);
+        $this->signup('b@gmail.test', ['phone' => '+251 911 234 413'])->assertOk();
+    }
+
+    public function test_claiming_an_hr_account_keeps_the_company_name(): void
+    {
+        $token = $this->signup('abebe@ethiotelecom.test', ['first_name' => 'Someone', 'last_name' => 'Else', 'phone' => '0922000111'])->json('mfa_token');
+        $this->postJson('/api/v1/auth/signup/verify', ['mfa_token' => $token, 'code' => $this->code()])->assertOk();
+
+        $u = $this->user->fresh();
+        $this->assertSame('Abebe Kebede', $u->name);
+        $this->assertSame('+251922000111', $u->phone, 'HR left the phone empty');
+    }
+
     public function test_anyone_can_sign_up_but_nothing_works_until_a_number_is_entered(): void
     {
         $token = $this->signup('Selam@Gmail.test')->assertOk()->json('mfa_token');
@@ -139,9 +173,15 @@ class EmployeeSignupTest extends TestCase
         $this->getJson('/api/v1/mobile/qr-token')->assertJsonMissingPath('code');
     }
 
-    private function signup(string $email)
+    private function signup(string $email, array $extra = [])
     {
-        return $this->postJson('/api/v1/auth/signup', ['email' => $email, 'password' => self::PASSWORD, 'password_confirmation' => self::PASSWORD]);
+        // A different phone per email, so several sign-ups in one test don't clash.
+        $phone = '09'.str_pad((string) (crc32(strtolower($email)) % 100000000), 8, '0', STR_PAD_LEFT);
+
+        return $this->postJson('/api/v1/auth/signup', $extra + [
+            'email' => $email, 'password' => self::PASSWORD, 'password_confirmation' => self::PASSWORD,
+            'first_name' => 'Selam', 'last_name' => 'Tesfaye', 'phone' => $phone,
+        ]);
     }
 
     private function code(): string
