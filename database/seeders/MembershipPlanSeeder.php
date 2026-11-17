@@ -11,7 +11,7 @@ class MembershipPlanSeeder extends Seeder
     {
         $plans = [
             [
-                'name'            => 'Platinum',
+                'name'            => 'Fit Platinum',
                 'tier'            => 'platinum',
                 'monthly_fee_etb' => 19600.00,
                 'duration_months' => 1,
@@ -20,7 +20,7 @@ class MembershipPlanSeeder extends Seeder
                 'is_active'       => true,
             ],
             [
-                'name'            => 'Basic Plus',
+                'name'            => 'Fit Basic Plus',
                 'tier'            => 'basic_plus',
                 'monthly_fee_etb' => 7200.00,
                 'duration_months' => 1,
@@ -29,7 +29,7 @@ class MembershipPlanSeeder extends Seeder
                 'is_active'       => true,
             ],
             [
-                'name'            => 'Basic',
+                'name'            => 'Fit Basic',
                 'tier'            => 'basic',
                 'monthly_fee_etb' => 3800.00,
                 'duration_months' => 1,

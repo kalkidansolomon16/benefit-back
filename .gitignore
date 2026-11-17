@@ -22,3 +22,10 @@
 Homestead.json
 Homestead.yaml
 Thumbs.db
+
+# Never commit archives, database dumps or uploads (they end up public)
+*.zip
+*.sql
+*.sql.gz
+/storage/app/public/*
+!/storage/app/public/.gitignore

@@ -1,0 +1,207 @@
+<?php
+
+namespace Tests\Feature;
+
+use App\Mail\FitAccessNotificationMail;
+use App\Models\Company;
+use App\Models\Employee;
+use App\Models\User;
+use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Support\Facades\Cache;
+use Illuminate\Support\Facades\Hash;
+use Illuminate\Support\Facades\Http;
+use Illuminate\Support\Facades\Mail;
+use Laravel\Sanctum\Sanctum;
+use Tests\TestCase;
+
+/** Member app sign-up (any email, confirmed by a code) and activating a membership with the 12-digit number. */
+class EmployeeSignupTest extends TestCase
+{
+    use RefreshDatabase;
+
+    private const PASSWORD = 'Abebe-Strong-2026!x';
+
+    private User $user;
+    private Employee $employee;
+
+    protected function setUp(): void
+    {
+        parent::setUp();
+        Mail::fake();
+        Http::fake(); // Pwned Passwords lookup in StrongPassword
+        Cache::flush();
+        $company = Company::forceCreate(['name' => 'Ethio Telecom', 'contact_email' => 'hr@et.test', 'contact_person' => 'HR', 'contact_phone' => '1', 'address' => 'a', 'city' => 'Addis Ababa']);
+        // As HR creates it: temporary password, must reset, approved (active).
+        $this->user = User::forceCreate(['name' => 'Abebe Kebede', 'email' => 'abebe@ethiotelecom.test', 'password' => Hash::make('temp-Pass-123!x'), 'role' => 'employee', 'is_active' => true, 'must_reset_password' => true, 'company_id' => $company->id]);
+        $this->employee = Employee::forceCreate(['user_id' => $this->user->id, 'company_id' => $company->id, 'fan_number' => 'FAN-1', 'is_enrolled' => true, 'registration_status' => 'approved', 'admin_approval_status' => 'approved']);
+        $this->employee->refresh();
+    }
+
+    public function test_sign_up_with_the_company_email_and_a_code(): void
+    {
+        $token = $this->signup('Abebe@EthioTelecom.test')
+            ->assertOk()->assertJsonPath('mfa_method', 'email')->assertJsonPath('masked_contact', 'a••••••@ethiotelecom.test')
+            ->assertJsonMissingPath('token')->json('mfa_token');
+
+        $this->assertTrue(Hash::check('temp-Pass-123!x', $this->user->fresh()->password), 'nothing changes before the code');
+
+        $this->postJson('/api/v1/auth/signup/verify', ['mfa_token' => $token, 'code' => $this->code(), 'device_name' => 'FitAccess · Android'])
+            ->assertOk()->assertJsonPath('user.role', 'employee')->assertJsonStructure(['token', 'refresh_token']);
+
+        $u = $this->user->fresh();
+        $this->assertTrue(Hash::check(self::PASSWORD, $u->password));
+        $this->assertFalse((bool) $u->must_reset_password);
+
+        // From now on it's a normal sign-in.
+        $this->signup('abebe@ethiotelecom.test')->assertStatus(409)->assertJsonPath('code', 'already_registered');
+    }
+
+    public function test_sign_up_saves_the_name_and_phone(): void
+    {
+        $token = $this->signup('selam@gmail.test', ['first_name' => ' Selam ', 'last_name' => 'Tesfaye', 'phone' => '0911 234 412'])->assertOk()->json('mfa_token');
+        $this->postJson('/api/v1/auth/signup/verify', ['mfa_token' => $token, 'code' => $this->codeTo('selam@gmail.test')])->assertOk();
+
+        $u = User::where('email', 'selam@gmail.test')->firstOrFail();
+        $this->assertSame('Selam Tesfaye', $u->name);
+        $this->assertSame('+251911234412', $u->phone);
+
+        // No membership yet, so no member number to show.
+        Sanctum::actingAs($u);
+        $this->getJson('/api/v1/mobile/profile')->assertJsonPath('data.member_number', null)->assertJsonPath('data.card_number', null);
+    }
+
+    public function test_sign_up_needs_a_name_and_a_free_ethiopian_mobile(): void
+    {
+        $this->signup('a@gmail.test', ['first_name' => '', 'last_name' => '<b>'])->assertUnprocessable()->assertJsonValidationErrors(['first_name', 'last_name']);
+        $this->signup('a@gmail.test', ['phone' => '12345'])->assertUnprocessable()->assertJsonValidationErrors(['phone']);
+
+        User::forceCreate(['name' => 'Other', 'email' => 'other@x.test', 'password' => 'x', 'role' => 'member', 'is_active' => true, 'phone' => '+251911234412']);
+        $this->signup('a@gmail.test', ['phone' => '0911234412'])->assertUnprocessable()->assertJsonValidationErrors(['phone']);
+        $this->signup('b@gmail.test', ['phone' => '+251 911 234 413'])->assertOk();
+    }
+
+    public function test_claiming_an_hr_account_keeps_the_company_name(): void
+    {
+        $token = $this->signup('abebe@ethiotelecom.test', ['first_name' => 'Someone', 'last_name' => 'Else', 'phone' => '0922000111'])->json('mfa_token');
+        $this->postJson('/api/v1/auth/signup/verify', ['mfa_token' => $token, 'code' => $this->code()])->assertOk();
+
+        $u = $this->user->fresh();
+        $this->assertSame('Abebe Kebede', $u->name);
+        $this->assertSame('+251922000111', $u->phone, 'HR left the phone empty');
+    }
+
+    public function test_anyone_can_sign_up_but_nothing_works_until_a_number_is_entered(): void
+    {
+        $token = $this->signup('Selam@Gmail.test')->assertOk()->json('mfa_token');
+        $this->postJson('/api/v1/auth/signup/verify', ['mfa_token' => $token, 'code' => $this->codeTo('selam@gmail.test')])
+            ->assertOk()->assertJsonPath('user.role', 'member');
+
+        $u = User::where('email', 'selam@gmail.test')->firstOrFail();
+        Sanctum::actingAs($u);
+        $this->getJson('/api/v1/mobile/profile')->assertJsonPath('data.card_activated', false);
+        $this->getJson('/api/v1/mobile/qr-token')->assertForbidden();
+        $this->postJson('/api/v1/mobile/membership/activate', ['member_number' => '1234 5678 9015'])->assertUnprocessable()->assertJsonPath('code', 'wrong_number');
+    }
+
+    public function test_a_new_account_takes_an_hr_membership_only_with_the_company_email_code(): void
+    {
+        $token = $this->signup('abebe.k@gmail.test')->json('mfa_token');
+        $this->postJson('/api/v1/auth/signup/verify', ['mfa_token' => $token, 'code' => $this->codeTo('abebe.k@gmail.test')])->assertOk();
+        $me = User::where('email', 'abebe.k@gmail.test')->firstOrFail();
+        Sanctum::actingAs($me);
+
+        // The number alone isn't enough: a code goes to the company email.
+        Mail::fake();
+        $this->postJson('/api/v1/mobile/membership/activate', ['member_number' => $this->employee->card_number])
+            ->assertStatus(202)->assertJsonPath('code', 'confirm_by_email')->assertJsonPath('data.masked_contact', 'a••••••@ethiotelecom.test');
+        $this->assertSame($this->user->id, $this->employee->fresh()->user_id, 'nothing moves before the code');
+
+        $this->postJson('/api/v1/mobile/membership/activate/confirm', ['member_number' => $this->employee->card_number, 'code' => '000000' === $this->codeTo('abebe@ethiotelecom.test') ? '111111' : '000000'])
+            ->assertUnprocessable()->assertJsonPath('code', 'wrong_code');
+        $this->postJson('/api/v1/mobile/membership/activate/confirm', ['member_number' => $this->employee->card_number, 'code' => $this->codeTo('abebe@ethiotelecom.test')])
+            ->assertOk()->assertJsonPath('data.card_activated', true);
+
+        $e = $this->employee->fresh();
+        $this->assertSame($me->id, $e->user_id);
+        $this->assertNotNull($e->card_activated_at);
+        $this->assertSame('employee', $me->fresh()->role);
+        $this->assertFalse((bool) $this->user->fresh()->is_active, 'the unused HR account is switched off');
+    }
+
+    public function test_a_membership_in_use_cant_be_taken(): void
+    {
+        $this->user->forceFill(['must_reset_password' => false])->save();
+        $token = $this->signup('someone@gmail.test')->json('mfa_token');
+        $this->postJson('/api/v1/auth/signup/verify', ['mfa_token' => $token, 'code' => $this->codeTo('someone@gmail.test')])->assertOk();
+        Sanctum::actingAs(User::where('email', 'someone@gmail.test')->firstOrFail());
+
+        $this->postJson('/api/v1/mobile/membership/activate', ['member_number' => $this->employee->card_number])
+            ->assertStatus(409)->assertJsonPath('code', 'already_linked');
+    }
+
+    public function test_waiting_accounts_are_told_so(): void
+    {
+        $this->user->forceFill(['is_active' => false])->save();
+        $this->signup('abebe@ethiotelecom.test')->assertForbidden()->assertJsonPath('code', 'pending_approval');
+        Mail::assertNothingSent();
+    }
+
+    public function test_a_wrong_code_changes_nothing(): void
+    {
+        $token = $this->signup('abebe@ethiotelecom.test')->json('mfa_token');
+        $wrong = $this->code() === '000000' ? '111111' : '000000';
+        $this->postJson('/api/v1/auth/signup/verify', ['mfa_token' => $token, 'code' => $wrong])->assertUnprocessable()->assertJsonPath('code', 'wrong_code');
+        $this->assertTrue((bool) $this->user->fresh()->must_reset_password);
+    }
+
+    public function test_the_card_is_activated_once_on_the_server_and_unlocks_the_qr_code(): void
+    {
+        // The company's package is paid: an active gym membership.
+        $plan = \App\Models\MembershipPlan::forceCreate(['name' => 'Fit Basic', 'tier' => 'basic', 'monthly_fee_etb' => 3600]);
+        $gym = \App\Models\Gym::forceCreate(['name' => 'Bole Gym', 'address' => 'Bole', 'tier' => 'basic', 'is_active' => true]);
+        \App\Models\Membership::forceCreate(['employee_id' => $this->employee->id, 'gym_id' => $gym->id, 'plan_id' => $plan->id, 'status' => 'active', 'start_date' => now()->subDay()->toDateString(), 'end_date' => now()->addMonth()->toDateString()]);
+        $this->employee->forceFill(['payment_status' => 'paid', 'paid_until' => now()->addMonth()->toDateString()])->save();
+        Sanctum::actingAs($this->user);
+        $this->getJson('/api/v1/mobile/profile')->assertJsonPath('data.card_activated', false);
+        $this->getJson('/api/v1/mobile/qr-token')->assertForbidden()->assertJsonPath('code', 'card_not_activated');
+
+        $this->postJson('/api/v1/mobile/membership/activate', ['member_number' => $this->employee->card_number])
+            ->assertOk()->assertJsonPath('data.card_activated', true);
+
+        $this->assertNotNull($this->employee->fresh()->card_activated_at);
+        $this->getJson('/api/v1/mobile/profile')->assertJsonPath('data.card_activated', true);
+        $this->getJson('/api/v1/mobile/qr-token')->assertJsonMissingPath('code');
+    }
+
+    private function signup(string $email, array $extra = [])
+    {
+        // A different phone per email, so several sign-ups in one test don't clash.
+        $phone = '09'.str_pad((string) (crc32(strtolower($email)) % 100000000), 8, '0', STR_PAD_LEFT);
+
+        return $this->postJson('/api/v1/auth/signup', $extra + [
+            'email' => $email, 'password' => self::PASSWORD, 'password_confirmation' => self::PASSWORD,
+            'first_name' => 'Selam', 'last_name' => 'Tesfaye', 'phone' => $phone,
+        ]);
+    }
+
+    private function code(): string
+    {
+        return $this->codeTo('abebe@ethiotelecom.test');
+    }
+
+    private function codeTo(string $email): string
+    {
+        $code = '';
+        Mail::assertSent(FitAccessNotificationMail::class, function ($m) use (&$code, $email) {
+            if ($m->hasTo($email) && $m->emailSubject === 'Your FitAccess confirmation code') {
+                $code = $m->heading;
+
+                return true;
+            }
+
+            return false;
+        });
+
+        return $code;
+    }
+}

@@ -13,15 +13,136 @@ class Employee extends Model
 {
     use SoftDeletes;
 
+    protected static function booted(): void
+    {
+        // Every employee gets a FitAccess card number when created.
+        static::creating(function (Employee $employee) {
+            $employee->card_number ??= \App\Support\CardNumber::generate();
+        });
+    }
+
     protected $fillable = [
-        'user_id', 'company_id', 'fan_number', 'photo_path',
-        'job_title', 'level', 'department', 'is_enrolled', 'enrolled_at',
+        'user_id', 'company_id', 'company_branch_id', 'fan_number', 'photo_path',
+        'job_title', 'level', 'department', 'branch',
+        'request_note', 'registration_status', 'payment_status', 'paid_period', 'paid_until',
+        'is_enrolled', 'enrolled_at',
+        'admin_approval_status', 'payment_preference',
+        'is_enrolled', 'enrolled_at',
+        'banned_until', 'ban_reason', 'show_in_gym_list', 'card_activated_at', 'card_issued_at',
+        'birth_date', 'invited_at', 'invite_expires_at', 'invite_token_hash', 'account_created_at',
+        'activate_on', 'prorate_from',
     ];
 
+    /** A ban with no end date: it stays until an admin or HR lifts it. */
+    public const INDEFINITE_BAN = '9999-12-31 00:00:00';
+
+    public function companyBranch(): \Illuminate\Database\Eloquent\Relations\BelongsTo
+    {
+        return $this->belongsTo(CompanyBranch::class);
+    }
+
     protected $casts = [
-        'is_enrolled' => 'boolean',
-        'enrolled_at' => 'datetime',
+        'card_activated_at' => 'datetime',
+        'show_in_gym_list' => 'boolean',
+        'is_enrolled'  => 'boolean',
+        'enrolled_at'  => 'datetime',
+        'banned_until' => 'datetime',
+        'paid_until'   => 'date',
+        'card_activated_at' => 'datetime',
+        'card_issued_at'    => 'datetime',
+        'birth_date'        => 'date',
+        'invited_at'        => 'datetime',
+        'invite_expires_at' => 'datetime',
+        'account_created_at' => 'datetime',
+        'activate_on'       => 'date',
+        'prorate_from'      => 'date',
     ];
+
+    protected $hidden = ['invite_token_hash'];
+
+    /** Imported by the company but has not created their account from the invitation yet */
+    public function awaitingAccount(): bool
+    {
+        return $this->account_created_at === null;
+    }
+
+    /** FitAccess has sent this card number to the company (HR may now pass it on). */
+    public function isCardIssued(): bool
+    {
+        return $this->card_issued_at !== null;
+    }
+
+    /** Ban end for "days" days, or a ban that lasts until it is lifted (null days). */
+    public static function banEnd(?int $days): \Illuminate\Support\Carbon
+    {
+        return $days ? now()->addDays($days) : \Illuminate\Support\Carbon::parse(self::INDEFINITE_BAN);
+    }
+
+    public function isBanIndefinite(): bool
+    {
+        return $this->banned_until !== null && $this->banned_until->year >= 9000;
+    }
+
+    /** "until 12 Dec 2026" or "until it is lifted" */
+    public function banUntilText(): string
+    {
+        if (!$this->banned_until) return '';
+
+        return $this->isBanIndefinite()
+            ? 'until it is lifted'
+            : 'until ' . $this->banned_until->format('j M Y');
+    }
+
+    /**
+     * The employee has entered the card number HR gave them. Until then the
+     * employee portal is view-only (no check-in code, trainings or profile edits).
+     */
+    public function hasActivatedCard(): bool
+    {
+        return $this->card_activated_at !== null;
+    }
+
+    /**
+     * HR approved the employee but FitAccess has not given final approval yet.
+     * They may sign in to a view-only portal, but cannot activate their card.
+     */
+    public function isAwaitingAdminApproval(): bool
+    {
+        return $this->registration_status === 'approved'
+            && $this->admin_approval_status === 'pending';
+    }
+
+    /** Is this employee's access paid for today (their company's invoice covers today)? */
+    public function hasPaidAccess(): bool
+    {
+        return \App\Support\BillingPeriod::covers($this->paid_until);
+    }
+
+    /** active | expired (paid period ended) | unpaid (never paid) | suspended | inactive */
+    public function accessStatus(): string
+    {
+        if (!$this->is_enrolled) {
+            return 'inactive';
+        }
+        if (!$this->hasPaidAccess()) {
+            return $this->paid_until ? 'expired' : 'unpaid';
+        }
+
+        return $this->activeMembership?->status ?? 'active';
+    }
+
+    /** Short reason shown when check-in is refused because the paid period ended */
+    public function paidAccessMessage(): string
+    {
+        return $this->paid_until
+            ? 'FitAccess access ended on ' . $this->paid_until->format('j M Y') . '. The company needs to pay its next invoice to renew it.'
+            : 'FitAccess access has not been paid for yet. It starts once the company pays its invoice.';
+    }
+
+    public function getIsBannedAttribute(): bool
+    {
+        return $this->banned_until !== null && $this->banned_until->isFuture();
+    }
 
     public function user(): BelongsTo
     {
@@ -66,6 +187,52 @@ class Employee extends Model
             'chief'    => 'premium',
             'director' => 'basic_plus',
             default    => 'basic',
+        };
+    }
+
+    public static function levelToPackage(string $level): string
+    {
+        return match ($level) {
+            'chief'    => 'platinum',
+            'director' => 'basic_plus',
+            default    => 'basic',
+        };
+    }
+
+    public static function packageToLevel(string $package): string
+    {
+        $plan = MembershipPlan::where('tier', $package)->first();
+
+        if ($plan) {
+            if ($plan->target_level && $plan->target_level !== 'all') {
+                return $plan->target_level;
+            }
+
+            // No explicit target_level set — rank by price among active plans
+            // (cheapest → staff, priciest → chief, everything else → director).
+            $tiers = MembershipPlan::where('is_active', true)->orderBy('monthly_fee_etb')->pluck('tier')->values();
+            $index = $tiers->search($package);
+            $count = $tiers->count();
+
+            if ($index !== false && $count > 0) {
+                $percentile = $count > 1 ? $index / ($count - 1) : 0;
+
+                return match (true) {
+                    $percentile >= 0.66 => 'chief',
+                    $percentile >= 0.33 => 'director',
+                    default              => 'staff',
+                };
+            }
+        }
+
+        // Legacy fallback for canonical tier keys not backed by a plan record
+        $norm = strtolower(preg_replace('/^[a-z]+_(?=basic|premium|platinum|gold|silver)/i', '', $package) ?? $package);
+
+        return match (true) {
+            in_array($norm, ['platinum', 'premium', 'gold']) => 'chief',
+            str_contains($norm, 'basic_plus')                => 'director',
+            str_contains($norm, 'manager')                   => 'manager',
+            default                                          => 'staff',
         };
     }
 }

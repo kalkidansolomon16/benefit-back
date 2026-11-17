@@ -35,4 +35,35 @@ return [
         ],
     ],
 
+    'telegram' => [
+        'bot_token'    => env('TELEGRAM_BOT_TOKEN', ''),
+        'bot_username' => env('TELEGRAM_BOT_USERNAME', 'FitAccessBot'),
+        'proxy'        => env('TELEGRAM_PROXY', ''),
+        // Optional: Telegram sends this in X-Telegram-Bot-Api-Secret-Token on every update;
+        // set it, then run `php artisan telegram:webhook --set` so Telegram uses it.
+        'webhook_secret' => env('TELEGRAM_WEBHOOK_SECRET', ''),
+    ],
+
+    'chapa' => [
+        'secret_key'     => env('CHAPA_SECRET_KEY'),
+        'public_key'     => env('CHAPA_PUBLIC_KEY'),
+        'base_url'       => 'https://api.chapa.co/v1',
+        'return_url'     => env('CHAPA_RETURN_URL', 'http://localhost:5173/hr/billing/chapa-return'),
+        'webhook_url'    => env('CHAPA_WEBHOOK_URL', env('APP_URL') . '/api/v1/chapa/webhook'),
+        // Set in the Chapa dashboard's Webhooks tab (Settings → Webhooks) when you
+        // register the webhook URL — distinct from the API secret key.
+        'webhook_secret' => env('CHAPA_WEBHOOK_SECRET'),
+    ],
+
+    'recaptcha' => [
+        'site_key'   => env('RECAPTCHA_SITE_KEY'),
+        'secret_key' => env('RECAPTCHA_SECRET_KEY'),
+        'min_score'  => env('RECAPTCHA_MIN_SCORE', 0.5),
+    ],
+
+    // v2 one-time codes by SMS: none (default) | log (development only).
+    'sms' => [
+        'driver' => env('SMS_DRIVER', 'none'),
+    ],
+
 ];

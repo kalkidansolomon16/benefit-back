@@ -11,10 +11,15 @@ class UserResource extends JsonResource
             'name'       => $this->name,
             'email'      => $this->email,
             'role'       => $this->role,
+            // Admin team members (built-in or custom admin roles) use the admin portal
+            'admin_portal' => $this->resource->isAdmin(),
             'fan_number' => $this->fan_number,
             'phone'      => $this->phone,
             'photo_path' => $this->photo_path,
             'is_active'  => $this->is_active,
+            'company_id'        => $this->company_id,
+            'company_branch_id' => $this->company_branch_id,
+            'gym_id'            => $this->gym_id,
             'created_at' => $this->created_at,
         ];
     }
