@@ -483,7 +483,12 @@ class MobileController extends Controller
     {
         $perPage = min((int) ($request->per_page ?? 20), 50);
 
+        // Only the gyms the member's package opens (same rule as the website:
+        // the package comes from the employee's level; higher includes lower).
+        $memberTier = \App\Support\Tier::forLevel($request->user()?->employee?->level);
+
         $gyms = Gym::where('is_active', true)
+            ->whereIn('tier', \App\Support\Tier::gymTiersFor($memberTier))
             ->when($request->category, fn($q) => $q->where('category', $request->category))
             ->when($request->tier, fn($q) => $q->where('tier', $request->tier))
             ->when($request->search, fn($q) => $q->where(function ($sub) use ($request) {
@@ -499,7 +504,7 @@ class MobileController extends Controller
                 'id'            => $g->id,
                 'name'          => $g->name,
                 'category'      => $g->category ?? 'gym',
-                'tier'          => $g->tier,
+                'tier'          => \App\Support\Tier::canonical($g->tier),
                 'address'       => $g->address,
                 'sub_city'      => $g->sub_city,
                 'city'          => $g->city,
@@ -511,6 +516,7 @@ class MobileController extends Controller
                 'is_active'     => $g->is_active,
             ]),
             'meta' => [
+                'member_tier'  => $memberTier,
                 'current_page' => $gyms->currentPage(),
                 'last_page'    => $gyms->lastPage(),
                 'total'        => $gyms->total(),
