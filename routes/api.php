@@ -237,7 +237,7 @@ Route::prefix('v1')->group(function () {
             Route::get('visits/today',           [\App\Http\Controllers\PartnerMobileController::class, 'visitsToday']);
             Route::get('visits/monthly',         [\App\Http\Controllers\PartnerMobileController::class, 'visitsMonthly']);
             Route::get('reports',                [\App\Http\Controllers\PartnerMobileController::class, 'reports']);
-            Route::get('financials',             [\App\Http\Controllers\PartnerMobileController::class, 'financials']);
+            Route::get('facility',               [\App\Http\Controllers\PartnerMobileController::class, 'facility']);
             Route::get('staff',                  [\App\Http\Controllers\PartnerMobileController::class, 'staffList']);
             Route::post('staff/invite',          [\App\Http\Controllers\PartnerMobileController::class, 'inviteStaff']);
             Route::delete('staff/{gymStaff}',    [\App\Http\Controllers\PartnerMobileController::class, 'removeStaff']);

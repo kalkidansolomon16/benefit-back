@@ -48,12 +48,12 @@ class PartnerOwnerAccessTest extends TestCase
     {
         return [
             'dashboard' => ['/api/v1/partner/dashboard'],
-            'financials' => ['/api/v1/partner/financials'],
+            'facility' => ['/api/v1/partner/facility'],
             'staff list' => ['/api/v1/partner/staff'],
         ];
     }
 
-    public function test_me_reports_the_role_and_hides_commercial_terms_from_staff(): void
+    public function test_me_reports_the_role_and_never_money(): void
     {
         Sanctum::actingAs($this->staff);
         $staffMe = $this->getJson('/api/v1/partner/me')->assertOk();
@@ -65,11 +65,11 @@ class PartnerOwnerAccessTest extends TestCase
         Sanctum::actingAs($this->owner);
         $this->getJson('/api/v1/partner/me')
             ->assertJsonPath('data.is_owner', true)
-            ->assertJsonPath('data.gym.per_visit_rate', 150)
+            ->assertJsonMissingPath('data.gym.per_visit_rate')
             ->assertJsonPath('data.gym.tier', 'premium');
     }
 
-    public function test_reports_hide_payout_and_rates_from_staff(): void
+    public function test_reports_and_dashboard_carry_no_money(): void
     {
         Sanctum::actingAs($this->staff);
         $this->getJson('/api/v1/partner/reports')
@@ -80,9 +80,43 @@ class PartnerOwnerAccessTest extends TestCase
             ->assertJsonStructure(['data' => ['summary' => ['total_checkins', 'unique_members', 'active_days']]]);
 
         Sanctum::actingAs($this->owner);
-        $this->getJson('/api/v1/partner/reports')
-            ->assertJsonPath('data.estimated_payout.rate_per_visit', 150)
-            ->assertJsonPath('data.gym.per_visit_rate', 150);
+        $this->getJson('/api/v1/partner/reports')->assertOk()
+            ->assertJsonMissingPath('data.estimated_payout')
+            ->assertJsonMissingPath('data.gym.per_visit_rate');
+        $this->getJson('/api/v1/partner/dashboard')->assertOk()
+            ->assertJsonMissingPath('data.stats.estimated_payout')
+            ->assertJsonMissingPath('data.gym.per_visit_rate')
+            ->assertJsonPath('data.gym.name', 'Gym A');
+        // The finances endpoint is gone.
+        $this->getJson('/api/v1/partner/financials')->assertNotFound();
+    }
+
+    public function test_facility_profile_and_member_numbers(): void
+    {
+        $gym = Gym::first();
+        $gym->forceFill([
+            'contact_phone' => '+251911000111', 'contact_email' => 'hello@gyma.test', 'contact_person' => 'Selam',
+            'sub_city' => 'Bole', 'city' => 'Addis Ababa', 'opening_hours' => ['mon_fri' => '06:00 – 22:00'],
+            'facilities' => ['showers'], 'amenities' => json_encode(['parking', 'showers']),
+        ])->save();
+
+        Sanctum::actingAs($this->owner);
+        $this->getJson('/api/v1/partner/facility')->assertOk()
+            ->assertJsonPath('data.phone', '+251911000111')
+            ->assertJsonPath('data.email', 'hello@gyma.test')
+            ->assertJsonPath('data.opening_hours.mon_fri', '06:00 – 22:00')
+            ->assertJsonPath('data.amenities', ['parking', 'showers'])
+            ->assertJsonPath('data.staff_count', 2)
+            ->assertJsonMissingPath('data.per_visit_rate');
+
+        $this->patchJson('/api/v1/partner/facility', ['phone' => '+251911000222', 'contact_person' => 'Abebe'])->assertOk()
+            ->assertJsonPath('data.phone', '+251911000222')->assertJsonPath('data.contact_person', 'Abebe');
+
+        // Check-in lists show the 12-digit number, never the FA- account code.
+        $member = User::forceCreate(['name' => 'Hana', 'email' => 'hana@x.test', 'password' => 'x', 'role' => 'member', 'is_active' => true, 'member_code' => 'FA-00388', 'member_number' => '482109375512']);
+        \App\Models\Checkin::forceCreate(['user_id' => $member->id, 'gym_id' => $gym->id, 'checked_in_at' => now()]);
+        $this->getJson('/api/v1/partner/dashboard')->assertJsonPath('data.recent_checkins.0.member_code', '482109375512');
+        $this->getJson('/api/v1/partner/visits/today')->assertJsonPath('data.0.member_code', '482109375512');
     }
 
     public function test_staff_can_still_use_their_own_screens(): void

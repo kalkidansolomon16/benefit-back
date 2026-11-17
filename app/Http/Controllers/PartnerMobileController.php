@@ -98,11 +98,8 @@ class PartnerMobileController extends Controller
                     'name'     => $gym->name,
                     'category' => $gym->category ?? 'gym',
                     'address'  => $gym->address,
-                    // Commercial terms are owner-only (INSA CWE-602).
-                    ...($isOwner ? [
-                        'tier'           => $gym->tier,
-                        'per_visit_rate' => (float) ($gym->per_visit_rate ?? 0),
-                    ] : []),
+                    // The partner app shows no money; the level is owner-only.
+                    ...($isOwner ? ['tier' => \App\Support\Tier::canonical($gym->tier)] : []),
                 ] : null,
                 // Authoritative for the app's owner/staff UI; never trust a stored role.
                 'is_owner'             => $isOwner,
@@ -275,20 +272,18 @@ class PartnerMobileController extends Controller
             ->where('checked_in_at', '>=', $monthStart)
             ->get();
 
-        $recentCheckins = Checkin::where('gym_id', $gym->id)
+        $recentCheckins = Checkin::with('user.employee')->where('gym_id', $gym->id)
             ->orderByDesc('checked_in_at')
             ->limit(10)
             ->get()
             ->map(fn($c) => [
                 'id'           => $c->id,
-                'member_name'  => User::find($c->user_id)?->name ?? 'Unknown',
-                'member_code'  => User::find($c->user_id)?->member_code ?? $c->recorded_by,
+                'member_name'  => $c->user?->name ?? 'Unknown',
+                'member_code'  => self::memberNumber($c->user),
                 'package_name' => null,
                 'package_tier' => null,
                 'checked_in_at'=> $c->checked_in_at?->toIso8601String(),
             ]);
-
-        $estimatedPayout = $monthCheckins->count() * (float) ($gym->per_visit_rate ?? 0);
 
         return response()->json([
             'data' => [
@@ -298,14 +293,12 @@ class PartnerMobileController extends Controller
                     'category'       => $gym->category ?? 'gym',
                     'tier'           => $gym->tier,
                     'address'        => $gym->address,
-                    'per_visit_rate' => (float) ($gym->per_visit_rate ?? 0),
                 ],
                 'stats' => [
                     'today_checkins'    => $todayCheckins->count(),
                     'today_unique'      => $todayCheckins->pluck('user_id')->unique()->count(),
                     'month_checkins'    => $monthCheckins->count(),
                     'month_unique'      => $monthCheckins->pluck('user_id')->unique()->count(),
-                    'estimated_payout'  => round($estimatedPayout, 2),
                     'last_checkin_at'   => Checkin::where('gym_id', $gym->id)
                         ->latest('checked_in_at')->value('checked_in_at'),
                 ],
@@ -336,7 +329,7 @@ class PartnerMobileController extends Controller
             return [
                 'id'               => $c->id,
                 'member_name'      => $user?->name ?? 'Unknown',
-                'member_code'      => $user?->member_code ?? $user?->fan_number,
+                'member_code'      => self::memberNumber($user),
                 'package_name'     => null,
                 'package_tier'     => null,
                 'checked_in_at'    => $c->checked_in_at?->toIso8601String(),
@@ -379,7 +372,7 @@ class PartnerMobileController extends Controller
             return [
                 'id'               => $c->id,
                 'member_name'      => $user?->name ?? 'Unknown',
-                'member_code'      => $user?->member_code ?? $user?->fan_number,
+                'member_code'      => self::memberNumber($user),
                 'package_name'     => null,
                 'package_tier'     => null,
                 'checked_in_at'    => $c->checked_in_at?->toIso8601String(),
@@ -438,16 +431,14 @@ class PartnerMobileController extends Controller
         $topMembers = $checkins->groupBy('user_id')
             ->map(fn($group, $userId) => [
                 'member_name' => User::find($userId)?->name ?? 'Unknown',
-                'member_code' => User::find($userId)?->member_code ?? '',
+                'member_code' => self::memberNumber(User::with('employee')->find($userId)),
                 'visits'      => $group->count(),
             ])
             ->sortByDesc('visits')
             ->take(5)
             ->values();
 
-        $estimatedPayout = $total * (float) ($gym->per_visit_rate ?? 0);
-
-        // Staff see attendance figures; rates, tier and payouts are owner-only.
+        // Attendance only: the partner app shows no money. The level is owner-only.
         $isOwner = $this->isOwner($request);
 
         return response()->json([
@@ -455,10 +446,7 @@ class PartnerMobileController extends Controller
                 'period' => Carbon::createFromDate($year, $mon, 1)->format('F Y'),
                 'gym'    => [
                     'name' => $gym->name,
-                    ...($isOwner ? [
-                        'per_visit_rate' => (float) ($gym->per_visit_rate ?? 0),
-                        'tier'           => $gym->tier,
-                    ] : []),
+                    ...($isOwner ? ['tier' => \App\Support\Tier::canonical($gym->tier)] : []),
                 ],
                 'summary' => [
                     'total_checkins'  => $total,
@@ -468,67 +456,8 @@ class PartnerMobileController extends Controller
                     'peak_day'        => $peakDay,
                     'peak_day_count'  => $peakDayCount ?? 0,
                 ],
-                'estimated_payout' => $isOwner ? [
-                    'checkins'       => $total,
-                    'rate_per_visit' => (float) ($gym->per_visit_rate ?? 0),
-                    'total'          => round($estimatedPayout, 2),
-                    'status'         => 'pending',
-                ] : null,
                 'daily_activity' => $dailyActivity,
                 'top_members'    => $topMembers,
-            ],
-        ]);
-    }
-
-    // ── Financials ────────────────────────────────────────────────────────────
-
-    public function financials(Request $request): JsonResponse
-    {
-        if (!$this->isOwner($request)) {
-            return response()->json(['message' => 'Owner access required.'], 403);
-        }
-
-        $gym = $this->getMyGym($request);
-        if (!$gym) return response()->json(['message' => 'No gym linked.'], 403);
-
-        $now           = now();
-        $monthCheckins = Checkin::where('gym_id', $gym->id)
-            ->whereYear('checked_in_at', $now->year)
-            ->whereMonth('checked_in_at', $now->month)
-            ->count();
-
-        $estimatedAmount = $monthCheckins * (float) ($gym->per_visit_rate ?? 0);
-
-        $payouts = PartnerPayout::where('gym_id', $gym->id)
-            ->orderByDesc('period_start')
-            ->get()
-            ->map(fn($p) => [
-                'id'           => $p->id,
-                'period'       => Carbon::parse($p->period_start)->format('F Y'),
-                'period_start' => $p->period_start?->toDateString(),
-                'period_end'   => $p->period_end?->toDateString(),
-                'total_checkins' => $p->total_checkins,
-                'total_amount'   => (float) $p->total_amount,
-                'status'         => $p->status,
-                'paid_at'        => $p->paid_at?->toIso8601String(),
-            ]);
-
-        return response()->json([
-            'data' => [
-                'agreement' => [
-                    'per_visit_rate'                => (float) ($gym->per_visit_rate ?? 0),
-                    'tier'                          => $gym->tier,
-                    'tier_name'                     => ucwords(str_replace('_', ' ', $gym->tier)),
-                    'max_visits_per_member_per_month'=> 20,
-                    'payout_schedule'               => 'monthly',
-                ],
-                'current_month' => [
-                    'period'           => $now->format('F Y'),
-                    'checkins'         => $monthCheckins,
-                    'estimated_amount' => round($estimatedAmount, 2),
-                    'status'           => 'pending',
-                ],
-                'payout_history' => $payouts->values(),
             ],
         ]);
     }
@@ -657,6 +586,59 @@ class PartnerMobileController extends Controller
 
     // ── Update facility ────────────────────────────────────────────────────────
 
+    /** GET /partner/facility: the gym's profile for the Facility tab (owner). */
+    public function facility(Request $request): JsonResponse
+    {
+        if (!$this->isOwner($request)) {
+            return response()->json(['message' => 'Owner access required.'], 403);
+        }
+        $gym = $this->getMyGym($request);
+        if (!$gym) return response()->json(['message' => 'No gym linked.'], 403);
+
+        return response()->json(['data' => $this->facilityProfile($gym)]);
+    }
+
+    private function facilityProfile(Gym $gym): array
+    {
+        return [
+            'id'              => $gym->id,
+            'name'            => $gym->name,
+            'branch_name'     => $gym->branch_name,
+            'category'        => $gym->category ?? 'gym',
+            'tier'            => \App\Support\Tier::canonical($gym->tier),
+            'address'         => $gym->address,
+            'sub_city'        => $gym->sub_city,
+            'city'            => $gym->city,
+            'latitude'        => $gym->latitude,
+            'longitude'       => $gym->longitude,
+            'contact_person'  => $gym->contact_person,
+            'phone'           => $gym->contact_phone,
+            'email'           => $gym->contact_email,
+            'opening_hours'   => $gym->opening_hours ?? [],
+            'amenities'       => self::amenities($gym),
+            'max_capacity'    => $gym->max_capacity,
+            'photo_url'       => $gym->photo_url,
+            'cover_photo_url' => $gym->cover_photo_url,
+            'is_active'       => (bool) $gym->is_active,
+            'staff_count'     => GymStaff::where('gym_id', $gym->id)->where('is_active', true)->count(),
+            'partner_since'   => ($gym->partnership_start ?? $gym->created_at)?->toDateString(),
+        ];
+    }
+
+    /** amenities (JSON text, not cast) and facilities (array), merged. */
+    private static function amenities(Gym $gym): array
+    {
+        $list = fn($v) => is_array($v) ? $v : (is_string($v) ? (json_decode($v, true) ?: []) : []);
+
+        return array_values(array_unique(array_filter(array_map('strval', array_merge($list($gym->getRawOriginal('amenities')), $list($gym->facilities))))));
+    }
+
+    /** The member's 12-digit number (never the internal FA- account code). */
+    private static function memberNumber(?User $user): string
+    {
+        return (string) ($user?->memberNumber() ?? '');
+    }
+
     public function updateFacility(Request $request): JsonResponse
     {
         if (!$this->isOwner($request)) {
@@ -668,24 +650,23 @@ class PartnerMobileController extends Controller
             'description' => 'sometimes|string|max:1000',
             'phone'       => 'sometimes|string|max:20',
             'address'     => 'sometimes|string|max:500',
+            'email'          => 'sometimes|nullable|email|max:255',
+            'contact_person' => 'sometimes|nullable|string|max:255',
         ]);
 
         $gym = $this->getMyGym($request);
         if (!$gym) return response()->json(['message' => 'No gym linked.'], 403);
 
         $gym->update(array_filter([
-            'name'          => $request->name,
-            'contact_phone' => $request->phone,
-            'address'       => $request->address,
+            'name'           => $request->name,
+            'contact_phone'  => $request->phone,
+            'address'        => $request->address,
+            'contact_email'  => $request->email,
+            'contact_person' => $request->contact_person,
         ]));
 
         return response()->json([
-            'data'    => [
-                'id'      => $gym->id,
-                'name'    => $gym->name,
-                'phone'   => $gym->contact_phone,
-                'address' => $gym->address,
-            ],
+            'data'    => $this->facilityProfile($gym->fresh()),
             'message' => 'Facility updated successfully.',
         ]);
     }
