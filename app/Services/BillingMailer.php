@@ -87,7 +87,8 @@ class BillingMailer
             'Coverage period' => self::coverageText($inv),
             'Employees'       => (string) $employees,
             'Total'           => 'ETB ' . number_format((float) $inv->total_amount, 2),
-            'Due date'        => $inv->due_date?->format('j M Y'),
+            'Payment due'     => $inv->due_date?->format('j M Y'),
+            'Grace period'    => $inv->closes_on ? 'Until ' . $inv->closes_on->format('j M Y') . ' — staff access is paused after that' : null,
         ]);
 
         $until = $inv->period_end?->format('j M Y');
@@ -108,7 +109,10 @@ class BillingMailer
                 details: $details,
                 buttonText: 'View and pay invoice',
                 buttonUrl: config('app.frontend_url') . '/hr/billing',
-                closing: 'You can choose how often you are invoiced (every 1, 3, 6 or 12 months) on the Billing page of the HR portal.',
+                closing: ($inv->closes_on
+                        ? 'If the invoice is still unpaid after ' . $inv->closes_on->format('j M Y') . ', it closes and your employees\' access is paused. They can be included again on next month\'s invoice, or you can request an exception on the Billing page. '
+                        : '')
+                    . 'You can choose how often you are invoiced (every 1, 3, 6 or 12 months) on the Billing page of the HR portal.',
             ),
             "invoice {$inv->invoice_number}"
         );
@@ -167,7 +171,9 @@ class BillingMailer
                     highlight: "Paid period ends on {$until}",
                     paragraphs: [
                         "The paid FitAccess period for {$count} employee" . ($count === 1 ? '' : 's') . " of {$company->name} ends on {$until}.",
-                        'FitAccess will send your next invoice. Pay it before that date so your employees can keep checking in without interruption.',
+                        'To continue: collect contracts from any new employees, import your updated employee list (Excel) in the HR portal, and pay the next invoice in the payment window ('
+                            . \App\Support\BillingCalendar::windowText(\App\Support\BillingCalendar::nextPeriodStart($row['until']->copy()->addDay())) . ').',
+                        'Employees already registered are not duplicated when you import again; only changes (phone, email, plan) are updated. If the payment is not completed, cards are paused until it is; the card numbers stay the same.',
                     ],
                     details: [
                         'Billing preference' => BillingPeriod::label((int) ($company->billing_cycle_months ?: 1)),

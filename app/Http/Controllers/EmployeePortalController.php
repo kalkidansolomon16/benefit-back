@@ -2,12 +2,17 @@
 
 namespace App\Http\Controllers;
 
+use App\Models\AuditLog;
 use App\Models\Employee;
 use App\Models\Gym;
 use App\Models\MembershipPlan;
+use App\Models\NewsPost;
+use App\Models\WellnessProgram;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Carbon;
+use Illuminate\Support\Facades\Cache;
+use Illuminate\Validation\ValidationException;
 
 class EmployeePortalController extends Controller
 {
@@ -105,7 +110,8 @@ class EmployeePortalController extends Controller
                 'email'      => $user?->email,
                 'phone'      => $user?->phone,
                 'fan_number' => $employee->fan_number,
-                'card_number' => $employee->card_number,
+                // Hidden until the employee enters it (HR sends it to them)
+                'card_number' => $employee->hasActivatedCard() ? $employee->card_number : null,
                 'job_title'  => $employee->job_title,
                 'department' => $employee->department,
                 'branch'     => $employee->branch,
@@ -132,7 +138,240 @@ class EmployeePortalController extends Controller
             ],
             'recent_checkins' => $recentCheckins,
             'accessible_gyms' => $gyms,
+            'card'            => $this->cardPayload($employee),
+            'featured'        => NewsPost::visibleTo($employee->company_id)->where('is_featured', true)
+                ->orderByDesc('published_at')->orderByDesc('id')->limit(8)->get()
+                ->map(fn (NewsPost $n) => $this->newsPayload($n))->values(),
+            'news'            => NewsPost::visibleTo($employee->company_id)
+                ->orderByDesc('published_at')->orderByDesc('id')->limit(8)->get()
+                ->map(fn (NewsPost $n) => $this->newsPayload($n))->values(),
+            'trainings'       => $this->trainingsQuery()->limit(8)->get()
+                ->map(fn (WellnessProgram $t) => $this->trainingPayload($t, $employee))->values(),
         ]);
+    }
+
+    // ── Card activation ─────────────────────────────────────────────
+
+    private function cardPayload(Employee $employee): array
+    {
+        $activated = $employee->hasActivatedCard();
+
+        return [
+            'activated'    => $activated,
+            // HR approved, FitAccess final approval still pending: card can't be activated yet
+            'awaiting_approval' => !$activated && $employee->isAwaitingAdminApproval(),
+            // Banned: same card number, but it can't be used until the ban is lifted
+            'banned'       => $employee->is_banned,
+            'banned_text'  => $employee->is_banned ? $employee->banUntilText() : null,
+            'number'       => $activated ? \App\Support\CardNumber::format($employee->card_number) : null,
+            'active_since' => $employee->card_activated_at?->toDateString(),
+            'company'      => $employee->company?->name,
+            'status'       => $employee->accessStatus(),
+        ];
+    }
+
+    /**
+     * The employee types the card number HR sent them. Only their own card
+     * matches; repeated wrong entries lock activation for 15 minutes.
+     */
+    public function activateCard(Request $request): JsonResponse
+    {
+        $request->validate(['card_number' => 'required|string|max:32']);
+        $employee = $this->getMyEmployee();
+
+        if ($employee->hasActivatedCard()) {
+            return response()->json(['message' => 'Your card is already active.', 'card' => $this->cardPayload($employee)]);
+        }
+
+        if ($employee->isAwaitingAdminApproval() || !$employee->user?->is_active) {
+            return response()->json([
+                'message' => 'Your account is still waiting for FitAccess final approval. You can activate your card once it is approved.',
+                'code'    => 'awaiting_admin_approval',
+            ], 403);
+        }
+
+        if ($employee->is_banned) {
+            return response()->json([
+                'message' => 'Your card is suspended ' . $employee->banUntilText() . '. Please contact your HR team.',
+                'code'    => 'card_banned',
+            ], 403);
+        }
+        if (!$employee->isCardIssued()) {
+            return response()->json([
+                'message' => 'Your card number has not been sent yet. FitAccess e-mails it to you once your membership is paid.',
+                'code'    => 'card_not_issued',
+            ], 403);
+        }
+
+        $lockKey  = "card_activation_lock:{$employee->id}";
+        $countKey = "card_activation_fails:{$employee->id}";
+        if (Cache::has($lockKey)) {
+            return response()->json(['message' => 'Too many wrong attempts. Please try again in 15 minutes.'], 429);
+        }
+
+        $entered = \App\Support\CardNumber::normalize($request->input('card_number'));
+        if (!$entered || !$employee->card_number || !hash_equals($employee->card_number, $entered)) {
+            $fails = (int) Cache::get($countKey, 0) + 1;
+            Cache::put($countKey, $fails, now()->addMinutes(15));
+            if ($fails >= 5) {
+                Cache::put($lockKey, true, now()->addMinutes(15));
+                Cache::forget($countKey);
+            }
+            throw ValidationException::withMessages([
+                'card_number' => [$entered
+                    ? 'This card number does not match your account. Check the number your company sent you.'
+                    : 'Enter the 12-digit card number exactly as you received it.'],
+            ]);
+        }
+
+        Cache::forget($countKey);
+        $employee->update(['card_activated_at' => now()]);
+        AuditLog::record('updated', $employee, ['card_activated_at' => null], ['card_activated_at' => $employee->card_activated_at]);
+
+        return response()->json([
+            'message' => 'Your FitAccess card is now active.',
+            'card'    => $this->cardPayload($employee->fresh('company')),
+        ]);
+    }
+
+    // ── News ────────────────────────────────────────────────────────
+
+    private function newsPayload(NewsPost $n, bool $withBody = false): array
+    {
+        return array_filter([
+            'id'           => $n->id,
+            'title'        => $n->title,
+            'category'     => $n->category,
+            'excerpt'      => $n->excerpt,
+            'body'         => $withBody ? $n->body : null,
+            'image_url'    => $n->imageUrl(),
+            'link_url'     => $n->link_url,
+            'link_label'   => $n->link_label,
+            'published_at' => ($n->published_at ?? $n->created_at)?->toDateString(),
+        ], fn ($v, $k) => $k !== 'body' || $withBody, ARRAY_FILTER_USE_BOTH);
+    }
+
+    public function news(Request $request): JsonResponse
+    {
+        $employee = $this->getMyEmployee();
+        $base     = NewsPost::visibleTo($employee->company_id);
+
+        $items = (clone $base)
+            ->when($request->filled('category'), fn ($q) => $q->where('category', $request->category))
+            ->orderByDesc('published_at')->orderByDesc('id')
+            ->paginate(24);
+
+        return response()->json([
+            'data'       => collect($items->items())->map(fn (NewsPost $n) => $this->newsPayload($n))->values(),
+            'categories' => (clone $base)->distinct()->orderBy('category')->pluck('category')->values(),
+            'meta'       => ['current_page' => $items->currentPage(), 'last_page' => $items->lastPage(), 'total' => $items->total()],
+        ]);
+    }
+
+    public function newsShow(NewsPost $newsPost): JsonResponse
+    {
+        $employee = $this->getMyEmployee();
+        $visible  = NewsPost::visibleTo($employee->company_id)->whereKey($newsPost->id)->exists();
+        abort_unless($visible, 404);
+
+        return response()->json($this->newsPayload($newsPost, true));
+    }
+
+    // ── Trainings ───────────────────────────────────────────────────
+
+    private function trainingsQuery()
+    {
+        return WellnessProgram::where('is_active', true)
+            ->where(fn ($q) => $q->whereNull('end_date')->orWhere('end_date', '>=', now()->toDateString()))
+            ->withCount(['employees as participants_count' => fn ($q) => $q->where('employee_wellness.status', 'enrolled')])
+            ->orderByDesc('created_at');
+    }
+
+    private function trainingPayload(WellnessProgram $t, Employee $employee, bool $full = false): array
+    {
+        $joined = $t->relationLoaded('employees')
+            ? $t->employees->contains('id', $employee->id)
+            : $t->employees()->where('employees.id', $employee->id)->wherePivot('status', 'enrolled')->exists();
+
+        $payload = [
+            'id'               => $t->id,
+            'title'            => $t->title,
+            'category'         => $t->category,
+            'image_url'        => $t->imageUrl(),
+            'duration_minutes' => $t->duration_minutes,
+            'is_online'        => $t->is_online,
+            'location'         => $t->location,
+            'start_date'       => $t->start_date?->toDateString(),
+            'end_date'         => $t->end_date?->toDateString(),
+            'max_participants' => $t->max_participants,
+            'participants'     => $t->participants_count ?? null,
+            'joined'           => $joined,
+        ];
+        if ($full) {
+            $payload += [
+                'description'      => $t->description,
+                'provider'         => $t->provider,
+                'provider_contact' => $t->provider_contact,
+                'video_url'        => $employee->hasActivatedCard() && !$employee->is_banned ? $t->video_url : null,
+            ];
+        }
+
+        return $payload;
+    }
+
+    public function trainings(Request $request): JsonResponse
+    {
+        $employee = $this->getMyEmployee();
+        $items = $this->trainingsQuery()
+            ->when($request->filled('category'), fn ($q) => $q->where('category', $request->category))
+            ->paginate(24);
+
+        return response()->json([
+            'data'       => collect($items->items())->map(fn ($t) => $this->trainingPayload($t, $employee))->values(),
+            'categories' => WellnessProgram::where('is_active', true)->distinct()->orderBy('category')->pluck('category')->values(),
+            'meta'       => ['current_page' => $items->currentPage(), 'last_page' => $items->lastPage(), 'total' => $items->total()],
+        ]);
+    }
+
+    public function trainingShow(WellnessProgram $wellnessProgram): JsonResponse
+    {
+        abort_unless($wellnessProgram->is_active, 404);
+        $employee = $this->getMyEmployee();
+        $wellnessProgram->loadCount(['employees as participants_count' => fn ($q) => $q->where('employee_wellness.status', 'enrolled')]);
+
+        return response()->json($this->trainingPayload($wellnessProgram, $employee, true));
+    }
+
+    public function joinTraining(WellnessProgram $wellnessProgram): JsonResponse
+    {
+        abort_unless($wellnessProgram->is_active, 404);
+        $employee = $this->getMyEmployee();
+
+        if ($wellnessProgram->end_date && $wellnessProgram->end_date->isPast()) {
+            return response()->json(['message' => 'This training has ended.'], 422);
+        }
+        if ($wellnessProgram->max_participants) {
+            $taken = $wellnessProgram->employees()->wherePivot('status', 'enrolled')
+                ->where('employees.id', '!=', $employee->id)->count();
+            if ($taken >= $wellnessProgram->max_participants) {
+                return response()->json(['message' => 'This training is full.'], 422);
+            }
+        }
+
+        $wellnessProgram->employees()->syncWithoutDetaching([
+            $employee->id => ['status' => 'enrolled', 'enrolled_at' => now()],
+        ]);
+        $wellnessProgram->employees()->updateExistingPivot($employee->id, ['status' => 'enrolled']);
+
+        return response()->json(['message' => 'You joined this training.', 'joined' => true]);
+    }
+
+    public function leaveTraining(WellnessProgram $wellnessProgram): JsonResponse
+    {
+        $employee = $this->getMyEmployee();
+        $wellnessProgram->employees()->updateExistingPivot($employee->id, ['status' => 'dropped']);
+
+        return response()->json(['message' => 'You left this training.', 'joined' => false]);
     }
 
     /** Whether the employee's name may appear in the "who is in the gym" list */

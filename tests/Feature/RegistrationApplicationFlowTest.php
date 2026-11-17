@@ -94,10 +94,11 @@ class RegistrationApplicationFlowTest extends TestCase
             ->assertStatus(422)->assertJsonValidationErrors('email');
     }
 
-    public function test_company_application_requires_tin(): void
+    // TIN became optional (2026_11_14_000002_make_tin_number_optional).
+    public function test_company_application_tin_is_optional(): void
     {
         $this->postJson('/api/v1/auth/register/company', $this->companyPayload(['tin' => '']))
-            ->assertStatus(422)->assertJsonValidationErrors('tin');
+            ->assertJsonMissingValidationErrors('tin');
     }
 
     public function test_partner_application_stores_standards_and_optional_website(): void

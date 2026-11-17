@@ -11,7 +11,8 @@ class WellnessProgram extends Model
     use SoftDeletes;
 
     protected $fillable = [
-        'title', 'description', 'category', 'provider',
+        'title', 'description', 'image_path', 'video_url', 'duration_minutes',
+        'category', 'provider',
         'provider_contact', 'location', 'is_online',
         'start_date', 'end_date', 'max_participants', 'is_active',
     ];
@@ -21,7 +22,13 @@ class WellnessProgram extends Model
         'is_active'  => 'boolean',
         'start_date' => 'date',
         'end_date'   => 'date',
+        'duration_minutes' => 'integer',
     ];
+
+    public function imageUrl(): ?string
+    {
+        return $this->image_path ? url('/api/v1/files/' . ltrim($this->image_path, '/')) : null;
+    }
 
     public function employees(): BelongsToMany
     {

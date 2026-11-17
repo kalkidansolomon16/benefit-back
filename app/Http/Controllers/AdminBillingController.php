@@ -100,9 +100,24 @@ class AdminBillingController extends Controller
         $preferred = in_array((int) $company->billing_cycle_months, BillingPeriod::CYCLES, true)
             ? (int) $company->billing_cycle_months : 1;
         $months = $request->filled('period_months') ? (int) $request->period_months : $preferred;
-        $start  = $request->filled('period_start')
-            ? Carbon::parse($request->period_start)->startOfDay()
-            : BillingPeriod::suggestedStart($company->id, $singleEmp ? null : $branch);
+        if ($request->filled('period_start')) {
+            $start = Carbon::parse($request->period_start)->startOfDay();
+        } elseif ($singleEmp) {
+            // One employee: start the day after their own paid period (or today)
+            $paidUntil = Employee::whereKey($request->employee_id)->value('paid_until');
+            $next      = $paidUntil ? Carbon::parse($paidUntil)->addDay()->startOfDay() : null;
+            $start     = $next && $next->gt(now()->startOfDay()) ? $next : now()->startOfDay();
+        } else {
+            // Fixed calendar: periods start on the 1st. This month while it can
+            // still be paid (until the late deadline), otherwise next month; and
+            // never a month everyone is already paid for.
+            $start = \App\Support\BillingCalendar::nextPeriodStart();
+            $uncovered = BillingPeriod::suggestedStart($company->id, $branch);
+            $uncoveredMonth = $uncovered->day === 1 ? $uncovered : $uncovered->copy()->startOfMonth();
+            if ($uncoveredMonth->gt($start)) {
+                $start = $uncoveredMonth;
+            }
+        }
         $end    = BillingPeriod::endFor($start, $months);
 
         $empQuery = Employee::where('company_id', $company->id)
@@ -119,7 +134,7 @@ class AdminBillingController extends Controller
             $empQuery->where('id', $request->employee_id);
         }
 
-        $candidates = $empQuery->with('activeMembership.plan')->get();
+        $candidates = $empQuery->with('activeMembership.plan', 'user')->get();
 
         // Already paid for the start day → not billed again
         $alreadyCovered = $candidates->filter(fn($e) => $e->paid_until && $e->paid_until->gte($start))->count();
@@ -154,7 +169,7 @@ class AdminBillingController extends Controller
                     ? $company->name
                     : ($branchId ? ($branchNames[$branchId] ?? "Branch {$branchId}") : 'Head office'),
                 'employees' => $group,
-                'built'     => $this->buildInvoiceItems($group, $months),
+                'built'     => $this->buildInvoiceItems($group, $months, $start),
             ];
         }
 
@@ -185,11 +200,17 @@ class AdminBillingController extends Controller
             'period_start'     => $plan['start']->toDateString(),
             'period_end'       => $plan['end']->toDateString(),
             'period_text'      => BillingPeriod::rangeText($plan['start'], $plan['end']),
+            'due_date'         => \App\Support\BillingCalendar::dueDate($plan['start'])->toDateString(),
+            'closes_on'        => \App\Support\BillingCalendar::closesOn($plan['start'])->toDateString(),
+            'payment_window'   => \App\Support\BillingCalendar::windowText($plan['start']),
+            'late_fee_percent' => \App\Support\BillingCalendar::lateFeePercent(),
             'employees'        => array_sum(array_column($groups, 'employees')),
             'total'            => array_sum(array_column($groups, 'total')),
             'groups'           => $groups,
             'already_covered'  => $plan['alreadyCovered'],
             'already_invoiced' => $plan['alreadyInvoiced'],
+            // Billed employees who were paid before: their paid period ends before this start (a renewal)
+            'renewals'         => array_sum(array_map(fn($g) => $g['employees']->whereNotNull('paid_until')->count(), $plan['groups'])),
             'zero_plans'       => array_values(array_unique(array_merge([], ...array_column($groups, 'zero_plans')))),
         ]);
     }
@@ -235,7 +256,9 @@ class AdminBillingController extends Controller
                     'period_start'      => $start->toDateString(),
                     'period_end'        => $end->toDateString(),
                     'total_amount'      => $built['total'],
-                    'due_date'          => $request->due_date,
+                    // Fixed calendar: pay in the window (e.g. 1–4), late with a fee until the 7th, then closed
+                    'due_date'          => $request->due_date ?: \App\Support\BillingCalendar::dueDate($start)->toDateString(),
+                    'closes_on'         => \App\Support\BillingCalendar::closesOn($start)->toDateString(),
                     'notes'             => $request->notes,
                     'status'            => 'draft',
                 ]);
@@ -282,9 +305,10 @@ class AdminBillingController extends Controller
      *
      * @return array{items: array, total: float|int, details: string, zero_plans: array}
      */
-    private function buildInvoiceItems($employees, int $months = 1): array
+    private function buildInvoiceItems($employees, int $months = 1, ?Carbon $start = null): array
     {
         $planByTier   = [];   // tier => ['planKey', 'planTier', 'planName', 'price']
+        $extras       = [];   // prorated extra-day lines for late joiners
         $groupsByPlan = [];   // planKey => ['plan_tier', 'plan_name', 'unit_price', 'count']
 
         foreach ($employees as $emp) {
@@ -314,6 +338,23 @@ class AdminBillingController extends Controller
                 ];
             }
             $groupsByPlan[$planKey]['count']++;
+
+            // Late joiner (added after the staff-list cut-off): charge the extra days
+            // they already had access before this invoice's period, prorated by day.
+            if ($start && $emp->prorate_from && $emp->prorate_from->lt($start) && $info['price'] > 0) {
+                $to = $start->copy()->subDay();
+                $amount = \App\Support\BillingCalendar::prorate((float) $info['price'], $emp->prorate_from, $to);
+                if ($amount > 0) {
+                    $extras[] = [
+                        'plan_tier'      => $info['planTier'],
+                        'plan_name'      => mb_substr('Extra days: ' . ($emp->user?->name ?? 'Employee') . ' (' . $emp->prorate_from->format('j M') . ' - ' . $to->format('j M Y') . ', ' . $info['planName'] . ')', 0, 100),
+                        'employee_count' => 1,
+                        'unit_price'     => $amount,
+                        'months'         => 1,
+                        'subtotal'       => $amount,
+                    ];
+                }
+            }
         }
 
         $total = 0;
@@ -334,6 +375,11 @@ class AdminBillingController extends Controller
                 'months'         => $months,
                 'subtotal'       => $subtotal,
             ];
+        }
+
+        foreach ($extras as $x) {
+            $items[] = $x;
+            $total += $x['subtotal'];
         }
 
         $details = [];
@@ -376,11 +422,35 @@ class AdminBillingController extends Controller
             \Illuminate\Support\Facades\Log::error('Invoice sent Telegram failed: ' . $e->getMessage());
         }
         $emailed = BillingMailer::invoiceSent($billingInvoice->load(['company', 'items', 'companyBranch:id,name']));
+        if ($billingInvoice->company) {
+            \App\Services\Notifier::company($billingInvoice->company, 'invoice_sent',
+                "New invoice {$billingInvoice->invoice_number}: ETB " . number_format((float) $billingInvoice->total_amount, 2),
+                'Payment is due on ' . ($billingInvoice->due_date?->format('j M Y') ?? 'the due date')
+                . ($billingInvoice->closes_on ? ' (grace period until ' . $billingInvoice->closes_on->format('j M Y') . ').' : '.'),
+                null, $billingInvoice->branch_scoped ? $billingInvoice->company_branch_id : null, ['link' => '/hr/billing']);
+        }
 
         return response()->json([
             'message' => 'Invoice sent to company' . ($emailed ? ' and emailed to ' . implode(', ', $emailed) : '') . '.',
             'invoice' => $this->formatInvoice($billingInvoice),
         ]);
+    }
+
+    /** Bulk: send every draft (or the given ids) to its company in one go */
+    public function sendDrafts(Request $request): JsonResponse
+    {
+        $data = $request->validate(['ids' => 'nullable|array|max:500', 'ids.*' => 'integer']);
+        $drafts = BillingInvoice::where('status', 'draft')
+            ->when(!empty($data['ids']), fn ($q) => $q->whereIn('id', $data['ids']))
+            ->get();
+        if ($drafts->isEmpty()) {
+            return response()->json(['message' => 'There are no draft invoices to send.'], 422);
+        }
+        foreach ($drafts as $inv) {
+            $this->send($inv);
+        }
+
+        return response()->json(['message' => $drafts->count() . ' invoice(s) sent to the companies.', 'sent' => $drafts->count()]);
     }
 
     /* ── Delete draft invoice ─────────────────────────────────── */
@@ -452,6 +522,7 @@ class AdminBillingController extends Controller
             \Illuminate\Support\Facades\Log::error('Payment verified Telegram failed: ' . $e->getMessage());
         }
         BillingMailer::paymentConfirmed($billingPayment->invoice->load(['company', 'companyBranch:id,name']), $result['employees']);
+        $activation = $this->activatePaidEmployees($billingPayment->invoice);
 
         $until = $result['paid_until'] ? Carbon::parse($result['paid_until'])->format('j M Y') : null;
 
@@ -465,7 +536,78 @@ class AdminBillingController extends Controller
             'paid_until'          => $result['paid_until'],
             'employees_updated'   => $result['employees'],
             'memberships_created' => $result['memberships'],
+            'activation'          => $activation,
         ]);
+    }
+
+    /**
+     * After a verified payment: give the paid employees final approval, turn
+     * their accounts on, issue new card numbers to the company, and tell
+     * employees whose existing card works again. Card numbers never change.
+     */
+    private function activatePaidEmployees(BillingInvoice $invoice): array
+    {
+        $invoice->loadMissing('company');
+        $company = $invoice->company;
+        if (!$company) return ['approved' => 0, 'issued' => 0, 'reactivated' => 0];
+
+        $employees = $invoice->coveredEmployees()->with('user')->get();
+        if ($employees->isEmpty()) {
+            $employees = Employee::with('user')->where('company_id', $company->id)
+                ->when($invoice->employee_id, fn ($q) => $q->where('id', $invoice->employee_id))
+                ->where('payment_status', 'paid')
+                ->whereDate('paid_until', '>=', $invoice->period_end ?? now())
+                ->get();
+        }
+
+        $approved = 0;
+        $toIssue = collect();
+        $reactivated = 0;
+        foreach ($employees as $e) {
+            if (($e->registration_status ?? 'approved') !== 'approved') continue;
+
+            // Late joiner's extra days were on this invoice: nothing more to bill for them
+            if ($e->prorate_from && $invoice->period_start && $e->prorate_from->lt($invoice->period_start)) {
+                $e->update(['prorate_from' => null]);
+            }
+
+            if ($e->admin_approval_status !== 'approved') {
+                $e->update(['admin_approval_status' => 'approved', 'is_enrolled' => true, 'enrolled_at' => $e->enrolled_at ?? now()]);
+                $approved++;
+            }
+            if ($e->user && !$e->user->is_active) {
+                $e->user->update(['is_active' => true]);
+            }
+
+            if (!$e->card_issued_at) {
+                $toIssue->push($e->fresh('user'));
+            } elseif ($e->card_activated_at && $e->user) {
+                $reactivated++;
+                \App\Services\Notifier::user($e->user, 'card_active', 'Your FitAccess card is active',
+                    "{$company->name} has paid for your FitAccess membership. Your card (same number as before) works until "
+                    . ($e->fresh()->paid_until?->format('j M Y') ?? 'the end of the paid period') . '.',
+                    ['buttonText' => 'Open FitAccess', 'buttonUrl' => config('app.frontend_url') . '/employee/cards']);
+            } elseif ($e->user) {
+                \App\Services\Notifier::user($e->user, 'payment_done', 'Your membership is paid',
+                    "{$company->name} has paid for your FitAccess membership. FitAccess will e-mail you your card number shortly.",
+                    null);
+            }
+        }
+
+        $issued = 0;
+        if ($toIssue->isNotEmpty()) {
+            $r = \App\Services\CardIssuer::issue($company, $toIssue, true);
+            $issued = is_array($r) ? $r['issued'] : 0;
+            foreach ($toIssue as $e) {
+                if ($e->user) {
+                    \App\Services\Notifier::user($e->user, 'payment_done', 'Your FitAccess membership is paid',
+                        "{$company->name} has paid for your membership. FitAccess has e-mailed you your personal card number; enter it on the Cards page to start using partner gyms.",
+                        ['buttonText' => 'Open FitAccess', 'buttonUrl' => config('app.frontend_url') . '/employee/dashboard']);
+                }
+            }
+        }
+
+        return ['approved' => $approved, 'issued' => $issued, 'reactivated' => $reactivated];
     }
 
     /* ── Reject payment ───────────────────────────────────────── */
@@ -487,8 +629,23 @@ class AdminBillingController extends Controller
             'admin_notes' => $request->notes,
         ]);
 
-        // Revert invoice back to sent so company can resubmit
-        $billingPayment->invoice->update(['status' => 'sent']);
+        // Back to waiting for payment, respecting the calendar (late fee / closed)
+        $inv = $billingPayment->invoice;
+        $status = $inv->late_fee_applied_at ? 'overdue' : 'sent';
+        if ($inv->closes_on && $inv->closes_on->lt(now()->startOfDay())) {
+            $status = 'closed';
+        }
+        $inv->update(['status' => $status, 'closed_at' => $status === 'closed' ? now() : null]);
+
+        if ($inv->company) {
+            \App\Services\Notifier::company($inv->company, 'payment_rejected', "Payment for invoice {$inv->invoice_number} was not accepted",
+                "FitAccess could not verify your payment: {$request->notes}"
+                . ($status === 'closed'
+                    ? ' The payment period for this invoice has ended; you can request an exception (negotiation) on the Billing page.'
+                    : ' Please submit a correct receipt before ' . ($inv->closes_on?->format('j M Y') ?? 'the deadline') . '.'),
+                ['buttonText' => 'Open billing', 'buttonUrl' => config('app.frontend_url') . '/hr/billing'],
+                $inv->branch_scoped ? $inv->company_branch_id : null);
+        }
 
         try {
             $billingPayment->loadMissing('invoice');
@@ -533,10 +690,26 @@ class AdminBillingController extends Controller
             'reviewed_by' => auth()->id(),
         ]);
 
-        // Revert invoice back to 'sent' so the company can now proceed to pay
-        $billingNegotiation->invoice->update(['status' => 'sent']);
+        // Reopen the invoice for a few days so the company can pay
+        $days  = max(1, \App\Support\Settings::int('negotiation_extension_days'));
+        $until = now()->startOfDay()->addDays($days);
+        $billingNegotiation->update(['extended_until' => $until->toDateString()]);
+        $inv = $billingNegotiation->invoice;
+        $inv->update([
+            'status'    => $inv->late_fee_applied_at ? 'overdue' : 'sent',
+            'closes_on' => $until->toDateString(),
+            'closed_at' => null,
+        ]);
 
-        return response()->json(['message' => 'Negotiation approved. Company can now submit payment.']);
+        if ($inv->company) {
+            \App\Services\Notifier::company($inv->company, 'negotiation_approved', "Exception approved for invoice {$inv->invoice_number}",
+                'FitAccess approved your request. You can pay this invoice until ' . $until->format('j M Y') . '.'
+                . ($request->admin_notes ? " Note from FitAccess: {$request->admin_notes}" : ''),
+                ['buttonText' => 'Pay invoice', 'buttonUrl' => config('app.frontend_url') . '/hr/billing'],
+                $inv->branch_scoped ? $inv->company_branch_id : null);
+        }
+
+        return response()->json(['message' => 'Negotiation approved. The company can pay until ' . $until->format('j M Y') . '.']);
     }
 
     /* ── Reject negotiation ───────────────────────────────────── */
@@ -555,6 +728,17 @@ class AdminBillingController extends Controller
             'reviewed_at' => now(),
             'reviewed_by' => auth()->id(),
         ]);
+
+        $inv = $billingNegotiation->invoice;
+        if ($inv?->company) {
+            \App\Services\Notifier::company($inv->company, 'negotiation_rejected', "Exception request for invoice {$inv->invoice_number} was not approved",
+                "FitAccess reviewed your request and could not approve it: {$request->admin_notes} "
+                . ($inv->status === 'closed'
+                    ? 'This invoice stays closed. Your employees can be paid for in the next payment window.'
+                    : 'Please pay before ' . ($inv->closes_on?->format('j M Y') ?? 'the deadline') . '.'),
+                ['buttonText' => 'Open billing', 'buttonUrl' => config('app.frontend_url') . '/hr/billing'],
+                $inv->branch_scoped ? $inv->company_branch_id : null);
+        }
 
         return response()->json([
             'message'    => 'Negotiation rejected.',
@@ -633,7 +817,10 @@ class AdminBillingController extends Controller
             'period_end'     => $inv->period_end?->toDateString(),
             'covered_count'  => $inv->coveredEmployees()->count(),
             'total_amount'   => $inv->total_amount,
+            'late_fee_amount' => (float) $inv->late_fee_amount,
             'due_date'       => $inv->due_date?->toDateString(),
+            'closes_on'      => $inv->closes_on?->toDateString(),
+            'closed_at'      => $inv->closed_at?->toDateTimeString(),
             'notes'          => $inv->notes,
             'status'         => $inv->status,
             'sent_at'        => $inv->sent_at?->toDateTimeString(),

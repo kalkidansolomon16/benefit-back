@@ -83,6 +83,20 @@
               </table>
             @endif
 
+            @if(!empty($appLinks) || !empty($appText))
+              <table cellpadding="0" cellspacing="0" width="100%" style="margin:0 0 24px;background:#F3FCE6;border:1px solid #D9F2A8;border-radius:14px;">
+                <tr>
+                  <td style="padding:16px 18px;">
+                    <p style="margin:0 0 6px;font-size:15px;font-weight:700;color:#0B0C10;">Prefer your phone? Use the FitAccess app</p>
+                    <p style="margin:0 0 12px;font-size:14px;line-height:1.6;color:#374151;">{{ $appText ?? 'Download the FitAccess app and create your account there with the same details.' }}</p>
+                    @foreach($appLinks as $label => $url)
+                      <a href="{{ $url }}" style="display:inline-block;margin:0 8px 8px 0;background:#0B0C10;color:#FFFFFF;border-radius:999px;padding:10px 18px;font-size:14px;font-weight:700;text-decoration:none;">{{ $label }}</a>
+                    @endforeach
+                  </td>
+                </tr>
+              </table>
+            @endif
+
             @if($closing)
               <p style="margin:0 0 6px;font-size:15px;line-height:1.7;">{{ $closing }}</p>
             @endif

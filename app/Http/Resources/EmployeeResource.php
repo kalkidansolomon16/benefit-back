@@ -26,6 +26,12 @@ class EmployeeResource extends JsonResource
             'is_banned'      => $this->is_banned,
             'banned_until'   => $this->banned_until?->toIso8601String(),
             'ban_reason'     => $this->ban_reason,
+            'ban_indefinite' => $this->isBanIndefinite(),
+            // FitAccess card: one number for life; issued to the company, then activated by the employee
+            'card_number'    => $this->card_number ? \App\Support\CardNumber::format($this->card_number) : null,
+            'card_issued'    => $this->isCardIssued(),
+            'card_issued_at' => $this->card_issued_at?->toIso8601String(),
+            'card_activated' => $this->hasActivatedCard(),
             // User account active state (separate from enrollment)
             'user_is_active' => $this->whenLoaded('user', fn() => (bool) $this->user?->is_active, false),
             'gym_tier'    => $this->getGymTier(),

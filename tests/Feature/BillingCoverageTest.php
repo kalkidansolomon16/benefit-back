@@ -95,8 +95,8 @@ class BillingCoverageTest extends TestCase
             ->assertOk()
             ->assertJsonPath('preferred_months', 3)
             ->assertJsonPath('period_months', 3)
-            ->assertJsonPath('period_start', '2026-11-10')
-            ->assertJsonPath('period_end', '2027-02-09')
+            ->assertJsonPath('period_start', '2026-12-01')
+            ->assertJsonPath('period_end', '2027-02-28')
             ->assertJsonPath('employees', 2);
         // 2 employees × ETB 3,600 × 3 months
         $this->assertEquals(21600, $preview->json('total'));
@@ -104,7 +104,7 @@ class BillingCoverageTest extends TestCase
         $res = $this->postJson('/api/v1/admin/billing/invoices/generate', ['company_id' => $this->company->id])
             ->assertCreated()
             ->assertJsonPath('invoice.period_months', 3)
-            ->assertJsonPath('invoice.period_end', '2027-02-09')
+            ->assertJsonPath('invoice.period_end', '2027-02-28')
             ->assertJsonPath('invoice.items.0.months', 3);
 
         $invoice = BillingInvoice::find($res->json('invoice.id'));
@@ -132,27 +132,28 @@ class BillingCoverageTest extends TestCase
         Sanctum::actingAs($this->admin);
         $id = $this->postJson('/api/v1/admin/billing/invoices/generate', ['company_id' => $this->company->id])->json('invoice.id');
         $this->postJson("/api/v1/admin/billing/invoices/{$id}/send")->assertOk();
-        Mail::assertSent(FitAccessMail::class, fn($m) => $m->hasTo('hr@cov.test') && str_contains($m->emailSubject, '10 Nov 2026 – 9 Feb 2027'));
+        Mail::assertSent(FitAccessMail::class, fn($m) => $m->hasTo('hr@cov.test') && str_contains($m->emailSubject, '1 Dec 2026 – 28 Feb 2027'));
 
         $this->payInvoice($id);
 
         $emp = $this->employees[0]->fresh();
-        $this->assertSame('2027-02-09', $emp->paid_until->toDateString());
+        $this->assertSame('2027-02-28', $emp->paid_until->toDateString());
         $this->assertSame('paid', $emp->payment_status);
         $this->assertTrue($emp->hasPaidAccess());
-        $this->assertSame('2027-02-09', Membership::where('employee_id', $emp->id)->first()->end_date->toDateString());
+        $this->assertSame('2027-02-28', Membership::where('employee_id', $emp->id)->first()->end_date->toDateString());
 
-        // Employee may pick a gym today
+        // Employee may pick a gym today (once the card is activated)
+        $emp->forceFill(['card_activated_at' => now()])->save();
         Sanctum::actingAs($emp->user);
         $gym = Gym::first();
         $this->postJson('/api/v1/employee/select-gym', ['gym_id' => $gym->id])->assertCreated();
 
         // The public card check says active, with the paid-until date
         $this->postJson('/api/v1/public/card-status', ['card_number' => $emp->card_number])
-            ->assertJsonPath('status', 'active')->assertJsonPath('valid_until', '2027-02-09');
+            ->assertJsonPath('status', 'active')->assertJsonPath('valid_until', '2027-02-28');
 
-        // The day after the paid period: access stops
-        Carbon::setTestNow('2027-02-10 09:00:00');
+        // After the grace period (7th of the next month): access stops
+        Carbon::setTestNow('2027-03-08 09:00:00');
         $emp = $emp->fresh();
         $this->assertFalse($emp->hasPaidAccess());
         $this->assertSame('expired', $emp->accessStatus());
@@ -183,13 +184,13 @@ class BillingCoverageTest extends TestCase
 
         // The suggested start is the day after coverage ends
         $this->postJson('/api/v1/admin/billing/invoices/preview', ['company_id' => $this->company->id])
-            ->assertOk()->assertJsonPath('period_start', '2027-02-10')->assertJsonPath('period_end', '2027-05-09');
+            ->assertOk()->assertJsonPath('period_start', '2027-03-01')->assertJsonPath('period_end', '2027-05-31');
 
         $second = $this->postJson('/api/v1/admin/billing/invoices/generate', ['company_id' => $this->company->id])
             ->assertCreated()->json('invoice.id');
         $this->payInvoice($second);
 
-        $this->assertSame('2027-05-09', $this->employees[1]->fresh()->paid_until->toDateString());
+        $this->assertSame('2027-05-31', $this->employees[1]->fresh()->paid_until->toDateString());
         Carbon::setTestNow('2027-03-01 09:00:00');
         $this->assertTrue($this->employees[1]->fresh()->hasPaidAccess());
     }

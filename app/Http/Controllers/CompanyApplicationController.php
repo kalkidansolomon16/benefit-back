@@ -58,7 +58,8 @@ class CompanyApplicationController extends Controller
 
     public function approve(Request $request, CompanyApplication $companyApplication): JsonResponse
     {
-        $request->validate(['tier' => 'required|in:basic,basic_plus,platinum']);
+        // No company-wide plan: each employee's plan is set in the Excel import
+        $request->validate(['tier' => 'nullable|in:basic,basic_plus,platinum']);
 
         $app = $companyApplication;
         if ($app->status !== 'pending') {
@@ -82,7 +83,7 @@ class CompanyApplicationController extends Controller
             $company = Company::create([
                 'name'                     => $app->company_name,
                 'industry'                 => $app->industry,
-                'tier'                     => $request->tier,
+                'tier'                     => $request->tier ?: 'basic',
                 'contact_person'           => $app->contact_name,
                 'contact_email'            => $app->contact_email,
                 'contact_phone'            => $app->contact_phone,
@@ -155,8 +156,15 @@ class CompanyApplicationController extends Controller
             'emailed'       => ApplicationMailer::credentials(ApplicationMailer::COMPANY, $l['name'], $l['email'], $l['password'], $l['label']),
         ], $logins);
 
+        // Next step for the company: the employee contract + Excel template, with the import deadline
+        try {
+            \App\Services\ContractPack::send($company);
+        } catch (\Throwable $e) {
+            \Illuminate\Support\Facades\Log::error('Contract pack failed: ' . $e->getMessage());
+        }
+
         return response()->json([
-            'message'     => "\"{$company->name}\" approved. Login details were sent by email.",
+            'message'     => "\"{$company->name}\" approved. Login details, the employee contract and the Excel template were sent by email.",
             'company_id'  => $company->id,
             // Shown to the admin once, in case an email does not arrive
             'credentials' => $credentials,

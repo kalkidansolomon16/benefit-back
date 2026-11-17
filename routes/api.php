@@ -42,7 +42,7 @@ Route::prefix('v1')->group(function () {
     Route::post('auth/login',             [AuthController::class, 'login'])->middleware('throttle:login');
     Route::post('auth/mfa/setup/confirm', [AuthController::class, 'mfaSetupConfirm'])->middleware('throttle:login');
     Route::post('auth/mfa/verify',        [AuthController::class, 'mfaVerify'])->middleware('throttle:login');
-    Route::post('auth/mfa/resend',        [AuthController::class, 'mfaResend'])->middleware('throttle:3,10');
+    Route::post('auth/mfa/resend',        [AuthController::class, 'mfaResend'])->middleware('throttle:login');
     Route::post('auth/signup',            [AuthController::class, 'signup'])->middleware('throttle:register');
     Route::post('auth/signup/verify',     [AuthController::class, 'signupVerify'])->middleware('throttle:login');
     Route::post('auth/signup/resend',     [AuthController::class, 'signupResend'])->middleware('throttle:3,10');
@@ -141,6 +141,9 @@ Route::prefix('v1')->group(function () {
     Route::get('public/companies/{company}/branches', [CompanyController::class, 'publicBranches']);
     Route::post('public/card-status',      [\App\Http\Controllers\CardStatusController::class, 'check'])->middleware('throttle:card-check');
     Route::get('public/plans',             [MembershipPlanController::class, 'publicIndex']);
+    // Employees imported by their company create their account here (invitation link)
+    Route::get('public/join/{token}',      [\App\Http\Controllers\EmployeeJoinController::class, 'lookup'])->middleware('throttle:30,1');
+    Route::post('public/join',             [\App\Http\Controllers\EmployeeJoinController::class, 'claim'])->middleware('throttle:10,1');
 
     // ── Protected ───────────────────────────────────────────────────
     // Every group below is gated by account area (area: middleware, see
@@ -157,6 +160,13 @@ Route::prefix('v1')->group(function () {
         Route::get('auth/me',               [AuthController::class, 'me']);
         Route::post('auth/change-password', [AuthController::class, 'changePassword']);
         Route::post('auth/first-login-reset',  [AuthController::class, 'firstLoginReset']);
+        // Web portal notifications (HR, employee, partner): bell + pop-up after sign-in
+        Route::middleware('area:company,employee,gym')->group(function () {
+            Route::get('portal/notifications',              [\App\Http\Controllers\PortalNotificationController::class, 'index']);
+            Route::get('portal/notifications/unread-count', [\App\Http\Controllers\PortalNotificationController::class, 'unreadCount']);
+            Route::post('portal/notifications/read-all',    [\App\Http\Controllers\PortalNotificationController::class, 'markAllRead']);
+            Route::post('portal/notifications/{notification}/read', [\App\Http\Controllers\PortalNotificationController::class, 'markRead']);
+        });
 
         // ── Telegram user settings ────────────────────────────────────
         Route::prefix('telegram')->group(function () {
@@ -238,13 +248,24 @@ Route::prefix('v1')->group(function () {
         // ── Employee portal (web) ──────────────────────────────────────
         Route::prefix('employee')->middleware('area:employee')->group(function () {
             Route::get('dashboard',     [EmployeePortalController::class, 'dashboard']);
-            Route::patch('profile',     [EmployeePortalController::class, 'updateProfile']);
-            Route::get('checkin-token', [CheckinController::class, 'token']);
+            Route::post('activate-card', [EmployeePortalController::class, 'activateCard'])->middleware('throttle:10,1');
+            Route::get('news',                         [EmployeePortalController::class, 'news']);
+            Route::get('news/{newsPost}',              [EmployeePortalController::class, 'newsShow']);
+            Route::get('trainings',                    [EmployeePortalController::class, 'trainings']);
+            Route::get('trainings/{wellnessProgram}',  [EmployeePortalController::class, 'trainingShow']);
+
+            // Actions: only once the employee has activated their card
+            Route::middleware('employee.card')->group(function () {
+                Route::post('trainings/{wellnessProgram}/join',   [EmployeePortalController::class, 'joinTraining']);
+                Route::delete('trainings/{wellnessProgram}/join', [EmployeePortalController::class, 'leaveTraining']);
+                Route::patch('profile',     [EmployeePortalController::class, 'updateProfile']);
+                Route::get('checkin-token', [CheckinController::class, 'token']);
+            });
             Route::get('gyms',          [CheckinController::class, 'myGyms']);
             Route::get('gyms/{gym}/occupants', [CheckinController::class, 'occupants']);
             Route::get('gym-privacy',   [EmployeePortalController::class, 'gymPrivacy']);
-            Route::put('gym-privacy',   [EmployeePortalController::class, 'updateGymPrivacy']);
-            Route::post('select-gym',   [CheckinController::class, 'selectGym']);
+            Route::put('gym-privacy',   [EmployeePortalController::class, 'updateGymPrivacy'])->middleware('employee.card');
+            Route::post('select-gym',   [CheckinController::class, 'selectGym'])->middleware('employee.card');
         });
 
         // ── Company HR portal ──────────────────────────────────────────
@@ -279,10 +300,20 @@ Route::prefix('v1')->group(function () {
                 Route::get('employees',                           [HRController::class, 'employees']);
                 Route::post('employees',                          [HRController::class, 'registerEmployee']);
                 Route::post('employees/import',                   [HRController::class, 'importEmployees']);
+                // Company-led onboarding: contract + Excel template, import with preview, invitations, bulk cards
+                Route::get('onboarding',                          [\App\Http\Controllers\HROnboardingController::class, 'status']);
+                Route::get('onboarding/template',                 [\App\Http\Controllers\HROnboardingController::class, 'template']);
+                Route::get('onboarding/contract',                 [\App\Http\Controllers\HROnboardingController::class, 'contract']);
+                Route::post('employees/import/preview',           [\App\Http\Controllers\HROnboardingController::class, 'preview'])->middleware('throttle:20,1');
+                Route::post('employees/import/confirm',           [\App\Http\Controllers\HROnboardingController::class, 'confirm'])->middleware('throttle:20,1');
+                Route::post('employees/resend-invites',           [\App\Http\Controllers\HROnboardingController::class, 'resendInvites'])->middleware('throttle:5,1');
+                Route::post('employees/{employee}/resend-invite', [\App\Http\Controllers\HROnboardingController::class, 'resendInvite'])->middleware('throttle:20,1');
+                Route::post('employees/send-cards',               [HRController::class, 'sendCards'])->middleware('throttle:5,1');
                 Route::post('employees/bulk-approve',             [HRController::class, 'bulkApproveEmployees']);
                 Route::post('employees/bulk-reject',              [HRController::class, 'bulkRejectEmployees']);
                 Route::post('employees/{employee}/approve',       [HRController::class, 'approveEmployee']);
                 Route::post('employees/{employee}/reject',        [HRController::class, 'rejectEmployee']);
+                Route::post('employees/{employee}/send-card',     [HRController::class, 'sendCard'])->middleware('throttle:20,1');
                 Route::post('employees/{employee}/ban',           [HRController::class, 'banEmployee']);
                 Route::post('employees/{employee}/unban',         [HRController::class, 'unbanEmployee']);
                 Route::post('employees/{employee}/reset-2fa',     [HRController::class, 'resetEmployeeTwoFactor']);
@@ -328,6 +359,11 @@ Route::prefix('v1')->group(function () {
                 Route::post('upgrade-request',   [GymUpgradeController::class, 'submitRequest']);
                 Route::get('upgrade-requests',   [GymUpgradeController::class, 'myRequests']);
                 Route::get('branches',           [PartnerApplicationController::class, 'myBranches']);
+                // Monthly statements: FitAccess's statement of visits → the gym's VAT/TOT invoice → FitAccess's receipt
+                Route::get('statements',                                   [\App\Http\Controllers\PartnerStatementController::class, 'index']);
+                Route::get('statements/{partnerStatement}',                [\App\Http\Controllers\PartnerStatementController::class, 'show']);
+                Route::post('statements/{partnerStatement}/invoice',       [\App\Http\Controllers\PartnerStatementController::class, 'uploadInvoice'])->middleware('throttle:20,1');
+                Route::get('statements/{partnerStatement}/file/{kind}',    [\App\Http\Controllers\PartnerStatementController::class, 'file'])->whereIn('kind', ['invoice', 'receipt']);
                 Route::post('branches',          [PartnerApplicationController::class, 'requestBranch']);
                 Route::post('branches/{gym}/reset-password', [PartnerApplicationController::class, 'resetBranchPassword']);
             });
@@ -480,6 +516,19 @@ Route::prefix('v1')->group(function () {
             Route::post('employees/{employee}/reset-2fa',     [AdminUserController::class, 'resetEmployeeTwoFactor'])->middleware('permission:employees.edit');
             Route::post('employees/{employee}/ban',           [EmployeeController::class, 'ban'])->middleware('permission:employees.ban');
             Route::post('employees/{employee}/unban',         [EmployeeController::class, 'unban'])->middleware('permission:employees.ban');
+            // Card hand-over, step 1: FitAccess sends the card number(s) to the company
+            Route::post('employees/{employee}/issue-card',    [EmployeeController::class, 'issueCard'])->middleware('throttle:30,1');
+            Route::post('companies/{company}/issue-cards',    [EmployeeController::class, 'issueCompanyCards'])->middleware('throttle:10,1');
+            Route::post('employees/issue-cards',              [EmployeeController::class, 'issueCards'])->middleware('throttle:10,1');
+            // Rules & documents: payment calendar, late fee, deadlines, employee contract
+            Route::get('settings/rules',                      [\App\Http\Controllers\AdminRulesController::class, 'show']);
+            Route::put('settings/rules',                      [\App\Http\Controllers\AdminRulesController::class, 'update'])->middleware('permission:billing.create');
+            Route::put('settings/app-links',                  [\App\Http\Controllers\AdminRulesController::class, 'updateAppLinks'])->middleware('permission:billing.create');
+            Route::get('settings/contract',                   [\App\Http\Controllers\AdminRulesController::class, 'downloadContract']);
+            Route::post('settings/contract',                  [\App\Http\Controllers\AdminRulesController::class, 'uploadContract'])->middleware('permission:billing.create');
+            Route::delete('settings/contract',                [\App\Http\Controllers\AdminRulesController::class, 'resetContract'])->middleware('permission:billing.create');
+            Route::get('settings/employee-template',          [\App\Http\Controllers\AdminRulesController::class, 'downloadTemplate']);
+            Route::post('companies/{company}/send-contract',  [\App\Http\Controllers\AdminRulesController::class, 'sendContract'])->middleware('throttle:10,1');
 
             // Gyms (the attendance and memberships pages also read them)
             Route::apiResource('gyms', GymController::class)
@@ -529,10 +578,22 @@ Route::prefix('v1')->group(function () {
             Route::post('invoices/{invoice}/mark-paid', [InvoiceController::class, 'markPaid'])->middleware('permission:payments.verify');
 
             // Wellness Programs and Appointments (not used by the web app yet)
-            Route::apiResource('wellness-programs', WellnessProgramController::class)
-                ->middlewareFor(['index', 'show'], 'permission:dashboard.view')
-                ->middlewareFor(['store', 'update', 'destroy'], 'area:fulladmin');
-            Route::post('wellness-programs/{wellnessProgram}/enroll', [WellnessProgramController::class, 'enroll'])->middleware('area:fulladmin');
+            Route::apiResource('wellness-programs', WellnessProgramController::class)->only(['index', 'show'])->middleware('permission:content.view');
+            Route::apiResource('wellness-programs', WellnessProgramController::class)->only(['store', 'update', 'destroy'])->middleware('permission:content.manage');
+            Route::post('wellness-programs/{wellnessProgram}/enroll', [WellnessProgramController::class, 'enroll'])->middleware('permission:content.manage');
+
+            // News & Trainings shown on the employee portal (FitAccess admin)
+            Route::prefix('admin/content')->group(function () {
+                Route::get('companies',                       [\App\Http\Controllers\AdminContentController::class, 'companies'])->middleware('permission:content.view');
+                Route::get('news',                          [\App\Http\Controllers\AdminContentController::class, 'newsIndex'])->middleware('permission:content.view');
+                Route::post('news',                           [\App\Http\Controllers\AdminContentController::class, 'newsStore'])->middleware('permission:content.manage');
+                Route::post('news/{newsPost}',                [\App\Http\Controllers\AdminContentController::class, 'newsUpdate'])->middleware('permission:content.manage');
+                Route::delete('news/{newsPost}',              [\App\Http\Controllers\AdminContentController::class, 'newsDestroy'])->middleware('permission:content.manage');
+                Route::get('trainings',                       [\App\Http\Controllers\AdminContentController::class, 'trainingsIndex'])->middleware('permission:content.view');
+                Route::post('trainings',                      [\App\Http\Controllers\AdminContentController::class, 'trainingStore'])->middleware('permission:content.manage');
+                Route::post('trainings/{wellnessProgram}',    [\App\Http\Controllers\AdminContentController::class, 'trainingUpdate'])->middleware('permission:content.manage');
+                Route::delete('trainings/{wellnessProgram}',  [\App\Http\Controllers\AdminContentController::class, 'trainingDestroy'])->middleware('permission:content.manage');
+            });
             Route::apiResource('appointments', AppointmentController::class)
                 ->middlewareFor(['index', 'show'], 'permission:dashboard.view')
                 ->middlewareFor(['store', 'update', 'destroy'], 'area:fulladmin');
@@ -542,9 +603,19 @@ Route::prefix('v1')->group(function () {
             Route::prefix('admin/billing')->group(function () {
                 // Invoices
                 Route::get('invoices',                                      [AdminBillingController::class, 'index'])->middleware('permission:billing.view');
+                // Partner (gym) statements: monthly visits per gym and payment with receipt
+                Route::get('partner-statements',                                [\App\Http\Controllers\AdminPartnerStatementController::class, 'index'])->middleware('permission:billing.view');
+                Route::post('partner-statements/generate',                      [\App\Http\Controllers\AdminPartnerStatementController::class, 'generate'])->middleware('permission:billing.create');
+                Route::post('partner-statements/send-all',                      [\App\Http\Controllers\AdminPartnerStatementController::class, 'sendAll'])->middleware('permission:billing.send');
+                Route::get('partner-statements/{partnerStatement}',             [\App\Http\Controllers\AdminPartnerStatementController::class, 'show'])->middleware('permission:billing.view');
+                Route::put('partner-statements/{partnerStatement}/rates',       [\App\Http\Controllers\AdminPartnerStatementController::class, 'updateRates'])->middleware('permission:billing.create');
+                Route::post('partner-statements/{partnerStatement}/send',       [\App\Http\Controllers\AdminPartnerStatementController::class, 'send'])->middleware('permission:billing.send');
+                Route::post('partner-statements/{partnerStatement}/pay',        [\App\Http\Controllers\AdminPartnerStatementController::class, 'pay'])->middleware('permission:payments.verify');
+                Route::get('partner-statements/{partnerStatement}/file/{kind}', [\App\Http\Controllers\AdminPartnerStatementController::class, 'file'])->middleware('permission:billing.view')->whereIn('kind', ['invoice', 'receipt']);
                 Route::post('invoices/preview',                             [AdminBillingController::class, 'preview'])->middleware('permission:billing.create');
                 Route::post('invoices/generate',                            [AdminBillingController::class, 'generate'])->middleware('permission:billing.create');
                 Route::get('invoices/{billingInvoice}',                     [AdminBillingController::class, 'show'])->middleware('permission:billing.view');
+                Route::post('invoices/send-drafts',                           [AdminBillingController::class, 'sendDrafts'])->middleware('permission:billing.send');
                 Route::post('invoices/{billingInvoice}/send',               [AdminBillingController::class, 'send'])->middleware('permission:billing.send');
                 Route::delete('invoices/{billingInvoice}',                  [AdminBillingController::class, 'destroy'])->middleware('permission:billing.delete');
 

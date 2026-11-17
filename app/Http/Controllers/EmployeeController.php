@@ -92,12 +92,14 @@ class EmployeeController extends Controller
 
     public function ban(Request $request, Employee $employee): JsonResponse
     {
+        // No "days" = banned until someone lifts it. The card number stays the
+        // same; it simply cannot be used while the ban lasts.
         $data = $request->validate([
-            'days'       => 'required|integer|min:1|max:365',
+            'days'       => 'nullable|integer|min:1|max:365',
             'ban_reason' => 'nullable|string|max:500',
         ]);
 
-        $bannedUntil = now()->addDays($data['days']);
+        $bannedUntil = Employee::banEnd($data['days'] ?? null);
         $employee->update([
             'banned_until' => $bannedUntil,
             'ban_reason'   => $data['ban_reason'] ?? null,
@@ -105,12 +107,101 @@ class EmployeeController extends Controller
 
         AuditLog::record('updated', $employee, ['banned_until' => null], ['banned_until' => $bannedUntil]);
 
+        if ($employee->user) {
+            try {
+                app(TelegramService::class)->notifyUserBanned(
+                    $employee->user,
+                    $employee->isBanIndefinite() ? 'further notice' : $bannedUntil->toDateString(),
+                    $data['ban_reason'] ?? ''
+                );
+            } catch (\Throwable $e) {
+                \Illuminate\Support\Facades\Log::error('Ban Telegram failed: ' . $e->getMessage());
+            }
+        }
+
+        if ($employee->user) {
+            \App\Services\Notifier::user($employee->user, 'card_banned', 'Your FitAccess card is blocked',
+                'Your FitAccess card is blocked ' . $employee->banUntilText() . '.' . ($employee->ban_reason ? ' Reason: ' . $employee->ban_reason . '.' : '')
+                . ' You can still sign in, but you cannot check in at gyms or use other services until the ban is lifted. Please contact your HR team.',
+                ['buttonText' => 'Open FitAccess', 'buttonUrl' => config('app.frontend_url') . '/employee/cards']);
+        }
+
         return response()->json([
-            'message'  => "Employee banned until {$bannedUntil->toDateString()}.",
-            'employee' => new EmployeeResource($employee->fresh()),
+            'message'  => 'Employee banned ' . $employee->banUntilText() . '. Their card cannot be used until the ban is lifted.',
+            'employee' => new EmployeeResource($employee->fresh(['user', 'company'])),
         ]);
     }
 
+    /**
+     * Admin issues the employee's card number to their company (email + HR
+     * portal notice). Only after this can HR pass it on to the employee.
+     * The number itself never changes.
+     */
+    public function issueCard(Employee $employee): JsonResponse
+    {
+        if (!$employee->company) {
+            return response()->json(['message' => 'This employee is not linked to a company.'], 422);
+        }
+        $result = \App\Services\CardIssuer::issue($employee->company, collect([$employee]));
+        if (is_string($result)) {
+            return response()->json(['message' => $result], 422);
+        }
+
+        return response()->json([
+            'message'  => 'Card number e-mailed to ' . ($employee->user?->email ?? 'the employee') . '.',
+            'employee' => new EmployeeResource($employee->fresh(['user', 'company'])),
+        ]);
+    }
+
+    /**
+     * Bulk: e-mail card numbers to employees. With `company_id` → every approved,
+     * not-yet-issued card of that company; with `ids` → those employees.
+     */
+    public function issueCards(Request $request): JsonResponse
+    {
+        $data = $request->validate([
+            'company_id' => 'nullable|exists:companies,id',
+            'ids'        => 'nullable|array|max:2000',
+            'ids.*'      => 'integer',
+        ]);
+        abort_if(empty($data['company_id']) && empty($data['ids']), 422, 'Choose a company or employees.');
+
+        $employees = Employee::with('user', 'company')
+            ->when(!empty($data['ids']), fn ($q) => $q->whereIn('id', $data['ids']))
+            ->when(!empty($data['company_id']), fn ($q) => $q->where('company_id', $data['company_id'])->whereNull('card_issued_at'))
+            ->get();
+
+        $issued = 0;
+        $skipped = [];
+        foreach ($employees->groupBy('company_id') as $group) {
+            $company = $group->first()->company;
+            if (!$company) continue;
+            $r = \App\Services\CardIssuer::issue($company, $group);
+            if (is_string($r)) {
+                $skipped[] = "{$company->name}: {$r}";
+            } else {
+                $issued += $r['issued'];
+                $skipped = array_merge($skipped, $r['skipped']);
+            }
+        }
+
+        if (!$issued) {
+            return response()->json(['message' => $skipped ? implode(' ', $skipped) : 'No new cards to send.', 'skipped' => $skipped], 422);
+        }
+
+        return response()->json([
+            'message' => "{$issued} card number(s) e-mailed to the employees"
+                . ($skipped ? '; ' . count($skipped) . ' skipped.' : '.'),
+            'issued'  => $issued,
+            'skipped' => $skipped,
+        ]);
+    }
+
+    /** Admin issues every approved, not-yet-issued card of one company at once. */
+    public function issueCompanyCards(\App\Models\Company $company): JsonResponse
+    {
+        return $this->issueCards(new Request(['company_id' => $company->id]));
+    }
     /** ── Admin: activate or deactivate an employee's user account ── */
     public function toggleActive(Employee $employee): JsonResponse
     {
@@ -174,9 +265,15 @@ class EmployeeController extends Controller
         $employee->update(['banned_until' => null, 'ban_reason' => null]);
         AuditLog::record('updated', $employee, [], ['banned_until' => null]);
 
+        if ($employee->user) {
+            \App\Services\Notifier::user($employee->user, 'card_released', 'Your FitAccess card is active again',
+                'The ban on your FitAccess card has been lifted. Your card number stays the same and works again' . ($employee->hasPaidAccess() ? '.' : ' as soon as your company has paid for the current period.'),
+                ['buttonText' => 'Open FitAccess', 'buttonUrl' => config('app.frontend_url') . '/employee/cards']);
+        }
+
         return response()->json([
-            'message'  => 'Employee ban has been lifted.',
-            'employee' => new EmployeeResource($employee->fresh()),
+            'message'  => 'Ban lifted. The employee can use the same card number again.',
+            'employee' => new EmployeeResource($employee->fresh(['user', 'company'])),
         ]);
     }
 

@@ -35,7 +35,7 @@ class CheckinController extends Controller
 
         if ($employee->is_banned) {
             return response()->json([
-                'message' => 'This employee is currently banned until ' . $employee->banned_until->toDateString() . '.',
+                'message' => 'This employee is banned ' . $employee->banUntilText() . '. Their card cannot be used.',
             ], 403);
         }
 
@@ -395,7 +395,7 @@ class CheckinController extends Controller
 
         if ($employee->is_banned) {
             return response()->json([
-                'message' => 'This employee is currently banned until ' . $employee->banned_until->toDateString() . '.',
+                'message' => 'This employee is banned ' . $employee->banUntilText() . '. Their card cannot be used.',
             ], 403);
         }
 

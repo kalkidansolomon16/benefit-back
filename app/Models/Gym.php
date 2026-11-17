@@ -18,7 +18,7 @@ class Gym extends Model
         'tier', 'max_capacity', 'current_members',
         'monthly_fee_etb', 'quarterly_fee_etb', 'annual_fee_etb',
         'facilities', 'opening_hours', 'logo_path', 'photo_paths',
-        'is_active', 'is_partner', 'partnership_start', 'partnership_end',
+        'is_active', 'is_partner', 'partnership_start', 'partnership_end', 'visit_rates',
     ];
 
     protected $casts = [
@@ -29,6 +29,7 @@ class Gym extends Model
         'is_partner'       => 'boolean',
         'partnership_start'=> 'date',
         'partnership_end'  => 'date',
+        'visit_rates'      => 'array',
     ];
 
     // Virtual attribute (computed in PHP since SQLite/MySQL both handle it)

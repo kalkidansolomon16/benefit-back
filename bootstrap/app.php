@@ -20,6 +20,7 @@ return Application::configure(basePath: dirname(__DIR__))
             'area'       => \App\Http\Middleware\EnsureArea::class,
             'permission' => \App\Http\Middleware\CheckPermission::class,
             'branch.write' => \App\Http\Middleware\EnsureBranchWritable::class,
+            'employee.card' => \App\Http\Middleware\EnsureCardActivated::class,
         ]);
         // There is no web login page: never look up route('login') for API
         // guests (that lookup threw a 500 for requests without Accept: json).

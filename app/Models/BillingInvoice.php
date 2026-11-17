@@ -16,11 +16,16 @@ class BillingInvoice extends Model
         'period_months', 'period_start', 'period_end',
         'total_amount', 'due_date', 'notes', 'status',
         'sent_at', 'paid_at',
+        'late_fee_amount', 'late_fee_applied_at', 'closes_on', 'closed_at', 'last_reminder',
     ];
 
     protected $casts = [
         'branch_scoped' => 'boolean',
         'due_date' => 'date',
+        'closes_on' => 'date',
+        'closed_at' => 'datetime',
+        'late_fee_applied_at' => 'datetime',
+        'late_fee_amount' => 'decimal:2',
         'period_months' => 'integer',
         'period_start'  => 'date',
         'period_end'    => 'date',
