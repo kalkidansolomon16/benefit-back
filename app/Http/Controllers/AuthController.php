@@ -546,7 +546,7 @@ class AuthController extends Controller
         return response()->json([
             'user'  => array_merge((new UserResource($user))->toArray($request), [
                 'member_code'          => $user->member_code,
-                'must_change_password' => ($user->must_change_password ?? false) || ($user->must_reset_password ?? false),
+                'must_change_password' => $user->mustChangePasswordNow($gymStaff),
                 'gym_staff_role'       => $gymStaff?->role,
                 'gym_id'               => $gymStaff?->gym_id,
             ]),
@@ -555,7 +555,7 @@ class AuthController extends Controller
             'idle_timeout_minutes'  => SessionTokenService::policyFor($user)['idle'],
             ...self::refreshFields($pair),
             'permissions'           => $user->effectivePermissions(),
-            'must_change_password'  => $gymStaff?->must_change_password ?? ($user->must_reset_password ?? false),
+            'must_change_password'  => $user->mustChangePasswordNow($gymStaff),
             'gym_staff_role'        => $gymStaff?->role,
             'gym_id'                => $gymStaff?->gym_id,
         ]);
@@ -1063,6 +1063,8 @@ class AuthController extends Controller
             'password'            => Hash::make($request->password),
             'must_reset_password' => false,
         ]);
+        // Changed once (website or app): the partner app mustn't ask again.
+        \App\Models\GymStaff::where('user_id', $user->id)->update(['must_change_password' => false]);
 
         app(SessionTokenService::class)->revokeOtherSessions($user);
 
@@ -1128,6 +1130,8 @@ class AuthController extends Controller
             'password_reset_token'      => null,
             'password_reset_expires_at' => null,
         ]);
+        // They chose this password themselves: no "change your password" screen next.
+        \App\Models\GymStaff::where('user_id', $user->id)->update(['must_change_password' => false]);
 
         // Whoever triggered a reset may not be the only one holding sessions.
         app(SessionTokenService::class)->revokeAll($user);

@@ -181,6 +181,22 @@ class User extends Authenticatable implements CanResetPasswordContract
      * The 12-digit FitAccess number: the employee card number for company
      * members, users.member_number for individual members.
      */
+    /**
+     * Whether the next screen must be "set your own password". The users
+     * table decides (must_reset_password, cleared by a change on the website
+     * or in the app). The gym_staff flag only counts for staff a gym invited
+     * in the partner app, which is the only place their temporary password
+     * is recorded.
+     */
+    public function mustChangePasswordNow(?GymStaff $gymStaff = null): bool
+    {
+        if ($this->must_reset_password) {
+            return true;
+        }
+
+        return $this->role === 'gym_staff' && (bool) $gymStaff?->must_change_password;
+    }
+
     public function memberNumber(): ?string
     {
         return $this->employee?->card_number ?? $this->member_number;

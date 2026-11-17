@@ -107,7 +107,7 @@ class PartnerMobileController extends Controller
                 // Authoritative for the app's owner/staff UI; never trust a stored role.
                 'is_owner'             => $isOwner,
                 'staff_role'           => $gymStaff?->role ?? 'staff',
-                'must_change_password' => $gymStaff?->must_change_password ?? $user->must_change_password ?? false,
+                'must_change_password' => $user->mustChangePasswordNow($gymStaff),
             ],
         ]);
     }
