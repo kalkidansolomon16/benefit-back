@@ -35,6 +35,11 @@ class FitAccessMail extends Mailable
         public ?string $buttonText = null,
         public ?string $buttonUrl = null,
         public ?string $closing = null,
+        /** @var array<int, array{content: string, name: string, mime: string}> files attached to the email */
+        public array $files = [],
+        /** @var array<string, string> label => URL, shown as 'use the app' buttons */
+        public array $appLinks = [],
+        public ?string $appText = null,
     ) {}
 
     public function envelope(): Envelope
@@ -56,11 +61,16 @@ class FitAccessMail extends Mailable
             'buttonText'    => $this->buttonText,
             'buttonUrl'     => $this->buttonUrl,
             'closing'       => $this->closing,
+            'appLinks'      => $this->appLinks,
+            'appText'       => $this->appText,
         ]);
     }
 
     public function attachments(): array
     {
-        return [];
+        return array_map(
+            fn (array $f) => \Illuminate\Mail\Mailables\Attachment::fromData(fn () => $f['content'], $f['name'])->withMime($f['mime']),
+            $this->files
+        );
     }
 }

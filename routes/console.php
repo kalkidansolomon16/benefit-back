@@ -17,3 +17,6 @@ Schedule::command('sanctum:prune-expired --hours=24')->daily();
 
 // Billing: mark access whose paid period ended, and remind companies before it ends.
 Schedule::command('billing:coverage')->dailyAt('06:00');
+
+// Payment calendar: reminders, 2% late fee after the window, close after the late deadline.
+Schedule::command('billing:deadlines')->dailyAt('00:30');

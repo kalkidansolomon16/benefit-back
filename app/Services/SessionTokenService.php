@@ -102,7 +102,13 @@ class SessionTokenService
         }
 
         $user = $token->tokenable;
-        if (! $user instanceof User || ! $user->is_active) {
+        if (! $user instanceof User) {
+            return null;
+        }
+        // HR-approved employees awaiting FitAccess approval keep their view-only session
+        $viewOnly = ! $user->is_active && $user->role === 'employee'
+            && (bool) \App\Models\Employee::where('user_id', $user->id)->first()?->isAwaitingAdminApproval();
+        if (! $user->is_active && ! $viewOnly) {
             return null;
         }
 

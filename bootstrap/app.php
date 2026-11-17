@@ -17,6 +17,7 @@ return Application::configure(basePath: dirname(__DIR__))
         $middleware->alias([
             'permission' => \App\Http\Middleware\CheckPermission::class,
             'branch.write' => \App\Http\Middleware\EnsureBranchWritable::class,
+            'employee.card' => \App\Http\Middleware\EnsureCardActivated::class,
         ]);
     })
     ->withExceptions(function (Exceptions $exceptions): void {

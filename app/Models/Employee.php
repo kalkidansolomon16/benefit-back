@@ -28,8 +28,13 @@ class Employee extends Model
         'is_enrolled', 'enrolled_at',
         'admin_approval_status', 'payment_preference',
         'is_enrolled', 'enrolled_at',
-        'banned_until', 'ban_reason', 'show_in_gym_list',
+        'banned_until', 'ban_reason', 'show_in_gym_list', 'card_activated_at', 'card_issued_at',
+        'birth_date', 'invited_at', 'invite_expires_at', 'invite_token_hash', 'account_created_at',
+        'activate_on', 'prorate_from',
     ];
+
+    /** A ban with no end date: it stays until an admin or HR lifts it. */
+    public const INDEFINITE_BAN = '9999-12-31 00:00:00';
 
     public function companyBranch(): \Illuminate\Database\Eloquent\Relations\BelongsTo
     {
@@ -42,7 +47,69 @@ class Employee extends Model
         'enrolled_at'  => 'datetime',
         'banned_until' => 'datetime',
         'paid_until'   => 'date',
+        'card_activated_at' => 'datetime',
+        'card_issued_at'    => 'datetime',
+        'birth_date'        => 'date',
+        'invited_at'        => 'datetime',
+        'invite_expires_at' => 'datetime',
+        'account_created_at' => 'datetime',
+        'activate_on'       => 'date',
+        'prorate_from'      => 'date',
     ];
+
+    protected $hidden = ['invite_token_hash'];
+
+    /** Imported by the company but has not created their account from the invitation yet */
+    public function awaitingAccount(): bool
+    {
+        return $this->account_created_at === null;
+    }
+
+    /** FitAccess has sent this card number to the company (HR may now pass it on). */
+    public function isCardIssued(): bool
+    {
+        return $this->card_issued_at !== null;
+    }
+
+    /** Ban end for "days" days, or a ban that lasts until it is lifted (null days). */
+    public static function banEnd(?int $days): \Illuminate\Support\Carbon
+    {
+        return $days ? now()->addDays($days) : \Illuminate\Support\Carbon::parse(self::INDEFINITE_BAN);
+    }
+
+    public function isBanIndefinite(): bool
+    {
+        return $this->banned_until !== null && $this->banned_until->year >= 9000;
+    }
+
+    /** "until 12 Dec 2026" or "until it is lifted" */
+    public function banUntilText(): string
+    {
+        if (!$this->banned_until) return '';
+
+        return $this->isBanIndefinite()
+            ? 'until it is lifted'
+            : 'until ' . $this->banned_until->format('j M Y');
+    }
+
+    /**
+     * The employee has entered the card number HR gave them. Until then the
+     * employee portal is view-only (no check-in code, trainings or profile edits).
+     */
+    public function hasActivatedCard(): bool
+    {
+        return $this->card_activated_at !== null;
+    }
+
+    /**
+     * HR approved the employee but FitAccess has not given final approval yet.
+     * They may sign in to a view-only portal, but cannot activate their card.
+     */
+    public function isAwaitingAdminApproval(): bool
+    {
+        return $this->registration_status === 'approved'
+            && $this->admin_approval_status === 'pending';
+    }
 
     /** Is this employee's access paid for today (their company's invoice covers today)? */
     public function hasPaidAccess(): bool

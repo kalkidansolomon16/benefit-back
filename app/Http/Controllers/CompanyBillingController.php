@@ -166,6 +166,13 @@ class CompanyBillingController extends Controller
         $company = $this->getMyCompany();
         $this->authorizeInvoice($billingInvoice, $company);
 
+        if ($billingInvoice->status === 'closed') {
+            return response()->json([
+                'message' => 'The payment period for this invoice has ended, so it can no longer be paid. '
+                    . 'You can request an exception (negotiation); if FitAccess approves it, you can pay. Otherwise your employees can be paid for next month.',
+                'code'    => 'invoice_closed',
+            ], 422);
+        }
         if (!in_array($billingInvoice->status, ['sent', 'overdue'])) {
             return response()->json(['message' => 'This invoice is not awaiting payment.'], 422);
         }
@@ -196,6 +203,13 @@ class CompanyBillingController extends Controller
             'submitted_at'                  => now(),
         ]);
 
+        \App\Services\Notifier::admins('payment_submitted', "{$company->name} submitted a payment",
+            "Receipt for invoice {$billingInvoice->invoice_number} (ETB " . number_format((float) $billingInvoice->total_amount, 2) . ') is waiting for verification.',
+            ['invoice_id' => $billingInvoice->id, 'company_id' => $company->id]);
+        \App\Services\Notifier::company($company, 'payment_submitted', "Payment received for invoice {$billingInvoice->invoice_number}",
+            'Thank you. FitAccess will verify your receipt within 1–2 business days and then activate your employees.',
+            null, $billingInvoice->branch_scoped ? $billingInvoice->company_branch_id : null, ['link' => '/hr/billing']);
+
         return response()->json([
             'message'    => 'Payment submitted successfully. Our team will verify it within 1–2 business days.',
             'payment_id' => $payment->id,
@@ -209,8 +223,11 @@ class CompanyBillingController extends Controller
         $company = $this->getMyCompany();
         $this->authorizeInvoice($billingInvoice, $company);
 
-        if ($billingInvoice->status !== 'overdue') {
-            return response()->json(['message' => 'Negotiation can only be requested for overdue invoices.'], 422);
+        // Exceptions are for invoices past their payment window (late or closed)
+        $pastWindow = in_array($billingInvoice->status, ['overdue', 'closed'], true)
+            || ($billingInvoice->status === 'sent' && $billingInvoice->due_date && $billingInvoice->due_date->lt(now()->startOfDay()));
+        if (!$pastWindow) {
+            return response()->json(['message' => 'An exception can be requested once the payment window has passed (late or closed invoices).'], 422);
         }
 
         // Block if there is already a pending or approved negotiation
@@ -238,6 +255,13 @@ class CompanyBillingController extends Controller
             'submitted_at'       => now(),
         ]);
 
+        \App\Services\Notifier::admins('negotiation_submitted', "{$company->name} requested a payment exception",
+            "Invoice {$billingInvoice->invoice_number}: {$request->reason}",
+            ['invoice_id' => $billingInvoice->id, 'negotiation_id' => $negotiation->id, 'company_id' => $company->id], true);
+        \App\Services\Notifier::company($company, 'negotiation_submitted', "Exception request sent for invoice {$billingInvoice->invoice_number}",
+            'FitAccess will review your request and let you know. If it is approved, you can pay this invoice.',
+            null, $billingInvoice->branch_scoped ? $billingInvoice->company_branch_id : null, ['link' => '/hr/billing']);
+
         return response()->json([
             'message'     => 'Negotiation request submitted. Admin will review it shortly.',
             'negotiation' => $this->formatNegotiation($negotiation),
@@ -256,7 +280,14 @@ class CompanyBillingController extends Controller
             'period_start'   => $inv->period_start?->toDateString(),
             'period_end'     => $inv->period_end?->toDateString(),
             'total_amount'   => $inv->total_amount,
+            'late_fee_amount' => (float) $inv->late_fee_amount,
             'due_date'       => $inv->due_date?->toDateString(),
+            'closes_on'      => $inv->closes_on?->toDateString(),
+            'closed_at'      => $inv->closed_at?->toDateTimeString(),
+            'can_pay'        => in_array($inv->status, ['sent', 'overdue'], true),
+            'can_negotiate'  => (in_array($inv->status, ['overdue', 'closed'], true)
+                    || ($inv->status === 'sent' && $inv->due_date && $inv->due_date->lt(now()->startOfDay())))
+                && !in_array($inv->latestNegotiation?->status, ['pending'], true),
             'notes'          => $inv->notes,
             'status'         => $inv->status,
             'branch_scoped'  => (bool) $inv->branch_scoped,

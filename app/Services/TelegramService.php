@@ -439,7 +439,7 @@ class TelegramService
             $text .= "\n<b>Reason:</b> " . htmlspecialchars($reason);
         }
 
-        $text .= "\n\nYou will not be able to log in until the suspension period ends."
+        $text .= "\n\nYou can still sign in to view your portal, but your card, check-in and trainings are blocked until the suspension ends."
             . "\nContact your HR team if you believe this is a mistake.";
 
         $this->sendMessage($user->telegram_chat_id, $text);

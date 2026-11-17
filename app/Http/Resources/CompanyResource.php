@@ -56,8 +56,13 @@ class CompanyResource extends JsonResource
                     },
                     'registration_status' => $e->registration_status ?? 'approved',
                     'is_enrolled'         => $e->is_enrolled,
-                    'membership_status'   => $e->activeMembership?->status
-                                             ?? ($e->is_enrolled ? 'active' : 'inactive'),
+                    // A ban overrides everything: the card can't be used while it lasts
+                    'membership_status'   => $e->is_banned ? 'banned' : ($e->activeMembership?->status
+                                             ?? ($e->is_enrolled ? 'active' : 'inactive')),
+                    'is_banned'           => $e->is_banned,
+                    'banned_until'        => $e->banned_until?->toIso8601String(),
+                    'ban_indefinite'      => $e->isBanIndefinite(),
+                    'card_number'         => $e->card_number ? \App\Support\CardNumber::format($e->card_number) : null,
                     'enrolled_at'         => $e->enrolled_at?->toDateString()
                                              ?? $e->created_at->toDateString(),
                 ])

@@ -21,7 +21,7 @@ class HRController extends Controller
 {
     /* ── Helpers ─────────────────────────────────────────────────── */
 
-    private function getMyCompany(): Company
+    protected function getMyCompany(): Company
     {
         $user = auth()->user();
 
@@ -40,19 +40,19 @@ class HRController extends Controller
     }
 
     /** Branch this login belongs to; null for the head office (main company login) */
-    private function myBranchId(): ?int
+    protected function myBranchId(): ?int
     {
         return auth()->user()->company_branch_id ?: null;
     }
 
     /** Head office can manage every employee; a branch login only its own branch's */
-    private function canManage(Employee $employee): bool
+    protected function canManage(Employee $employee): bool
     {
         $mine = $this->myBranchId();
         return $mine === null || (int) $employee->company_branch_id === $mine;
     }
 
-    private function assertCanManage(Employee $employee): void
+    protected function assertCanManage(Employee $employee): void
     {
         if (!$this->canManage($employee)) {
             $owner = $employee->companyBranch?->name
@@ -68,7 +68,7 @@ class HRController extends Controller
      * ?branch_id=<id> picks a branch, ?branch_id=main the head office.
      * With no param a branch login defaults to its own branch when $defaultOwn is set.
      */
-    private function branchScope($query, Request $request, Company $company, bool $defaultOwn)
+    protected function branchScope($query, Request $request, Company $company, bool $defaultOwn)
     {
         $raw = $request->query('branch_id');
 
@@ -124,7 +124,7 @@ class HRController extends Controller
                 'id'          => $e->id,
                 'name'        => $e->user?->name,
                 'fan_number'  => $e->fan_number,
-                'card_number' => $e->card_number,
+                'card_number' => self::cardFields($e)['card_number'],
                 'package'     => Employee::levelToPackage($e->level ?? 'staff'),
                 'status'      => $e->accessStatus(),
                 'paid_until'  => $e->paid_until?->toDateString(),
@@ -177,7 +177,7 @@ class HRController extends Controller
                 'email'               => $e->user?->email,
                 'phone'               => $e->user?->phone,
                 'fan_number'          => $e->fan_number,
-                'card_number'         => $e->card_number,
+                ...self::cardFields($e),
                 'package'             => Employee::levelToPackage($e->level ?? 'staff'),
                 'level'               => $e->level,
                 'job_title'           => $e->job_title,
@@ -194,6 +194,7 @@ class HRController extends Controller
                 'enrolled_at'         => $e->enrolled_at?->toDateString() ?? $e->created_at->toDateString(),
                 'is_banned'           => $e->is_banned,
                 'banned_until'        => $e->banned_until?->toIso8601String(),
+                'ban_indefinite'      => $e->isBanIndefinite(),
                 'ban_reason'          => $e->ban_reason,
             ]);
 
@@ -394,6 +395,101 @@ class HRController extends Controller
         return response()->json(['message' => 'Employee registration rejected.', 'employee_id' => $employee->id]);
     }
 
+    /* ── Send card number to the employee ───────────────────────── */
+
+    /**
+     * HR hands the employee their card number by email (always) and Telegram
+     * (when the employee has linked the FitAccess bot). The employee then
+     * enters it once in the portal to activate their account.
+     */
+    public function sendCard(Request $request, Employee $employee): JsonResponse
+    {
+        $company = $this->getMyCompany();
+        if ($employee->company_id !== $company->id) abort(403);
+        $this->assertCanManage($employee);
+
+        $result = $this->deliverCard($employee, $company);
+        if (is_string($result)) {
+            return response()->json(['message' => $result], 422);
+        }
+        if (!$result) {
+            return response()->json(['message' => 'The card could not be sent. Please try again later.'], 502);
+        }
+
+        return response()->json([
+            'message'  => 'Card number sent by ' . implode(' and ', $result) . '.',
+            'sent_via' => $result,
+        ]);
+    }
+
+    /**
+     * Bulk: send the card number to every employee who can receive one
+     * (approved, card issued by FitAccess, not banned). Optional `ids` limits it;
+     * `only_new` (default true) skips employees who already activated their card.
+     */
+    public function sendCards(Request $request): JsonResponse
+    {
+        $company = $this->getMyCompany();
+        $data = $request->validate([
+            'ids'      => 'nullable|array|max:1000',
+            'ids.*'    => 'integer',
+            'only_new' => 'nullable|boolean',
+        ]);
+
+        $employees = $company->employees()->with('user')
+            ->whereNotNull('card_issued_at')
+            ->when(!empty($data['ids']), fn ($q) => $q->whereIn('id', $data['ids']))
+            ->when($data['only_new'] ?? true, fn ($q) => $q->whereNull('card_activated_at'))
+            ->when($this->myBranchId(), fn ($q, $b) => $q->where('company_branch_id', $b))
+            ->get();
+
+        $sent = 0;
+        $skipped = [];
+        foreach ($employees as $e) {
+            $r = $this->deliverCard($e, $company);
+            if (is_array($r) && $r) {
+                $sent++;
+            } else {
+                $skipped[] = ($e->user?->name ?? "#{$e->id}") . ': ' . (is_string($r) ? $r : 'could not be sent');
+            }
+        }
+
+        if (!$employees->count()) {
+            return response()->json(['message' => 'There are no card numbers to send right now. FitAccess sends them to you after your payment is confirmed.'], 422);
+        }
+
+        return response()->json([
+            'message' => "{$sent} card number(s) sent" . ($skipped ? ', ' . count($skipped) . ' skipped.' : '.'),
+            'sent'    => $sent,
+            'skipped' => $skipped,
+        ]);
+    }
+
+    /**
+     * Email (and Telegram) one employee their card number.
+     *
+     * @return string|string[]  error message, or the channels it was sent by (empty = failed)
+     */
+    protected function deliverCard(Employee $employee, Company $company)
+    {
+        $user = $employee->user;
+        if (!$user || !$employee->card_number) {
+            return 'This employee has no login or card number yet.';
+        }
+        if (!$user->is_active || $employee->isAwaitingAdminApproval()) {
+            return 'FitAccess has not given this employee final approval yet. Send the card once they are approved.';
+        }
+        if (!$employee->isCardIssued()) {
+            return 'FitAccess sends the card number once the membership is paid.';
+        }
+        if ($employee->is_banned) {
+            return 'This employee is banned. Their card cannot be used until the ban is lifted.';
+        }
+
+        return \App\Services\CardDelivery::toEmployee($employee);
+
+    }
+
     /* ── Ban / Unban employee ───────────────────────────────────── */
 
     public function banEmployee(Request $request, Employee $employee): JsonResponse
@@ -402,12 +498,13 @@ class HRController extends Controller
         if ($employee->company_id !== $company->id) abort(403);
         $this->assertCanManage($employee);
 
+        // No "days" = banned until it is lifted; the card number stays the same
         $data = $request->validate([
-            'days'       => 'required|integer|min:1|max:365',
+            'days'       => 'nullable|integer|min:1|max:365',
             'ban_reason' => 'nullable|string|max:500',
         ]);
 
-        $bannedUntil = now()->addDays($data['days']);
+        $bannedUntil = Employee::banEnd($data['days'] ?? null);
         $employee->update([
             'banned_until' => $bannedUntil,
             'ban_reason'   => $data['ban_reason'] ?? null,
@@ -416,15 +513,26 @@ class HRController extends Controller
         AuditLog::record('updated', $employee, ['banned_until' => null], ['banned_until' => $bannedUntil]);
 
         if ($employee->user) {
-            app(TelegramService::class)->notifyUserBanned(
-                $employee->user,
-                $bannedUntil->toDateString(),
-                $data['ban_reason'] ?? ''
-            );
+            try {
+                app(TelegramService::class)->notifyUserBanned(
+                    $employee->user,
+                    $employee->isBanIndefinite() ? 'further notice' : $bannedUntil->toDateString(),
+                    $data['ban_reason'] ?? ''
+                );
+            } catch (\Throwable $e) {
+                Log::error('Ban Telegram failed: ' . $e->getMessage());
+            }
+        }
+
+        if ($employee->user) {
+            \App\Services\Notifier::user($employee->user, 'card_banned', 'Your FitAccess card is blocked',
+                'Your FitAccess card is blocked ' . $employee->banUntilText() . '.' . ($employee->ban_reason ? ' Reason: ' . $employee->ban_reason . '.' : '')
+                . ' You can still sign in, but you cannot check in at gyms or use other services until the ban is lifted. Please contact your HR team.',
+                ['buttonText' => 'Open FitAccess', 'buttonUrl' => config('app.frontend_url') . '/employee/cards']);
         }
 
         return response()->json([
-            'message'  => "Employee banned until {$bannedUntil->toDateString()}.",
+            'message'  => 'Employee banned ' . $employee->banUntilText() . '. Their card cannot be used until the ban is lifted.',
             'employee' => $this->employeePayload($employee->fresh()),
         ]);
     }
@@ -438,8 +546,14 @@ class HRController extends Controller
         $employee->update(['banned_until' => null, 'ban_reason' => null]);
         AuditLog::record('updated', $employee, [], ['banned_until' => null]);
 
+        if ($employee->user) {
+            \App\Services\Notifier::user($employee->user, 'card_released', 'Your FitAccess card is active again',
+                'The ban on your FitAccess card has been lifted. Your card number stays the same and works again' . ($employee->hasPaidAccess() ? '.' : ' as soon as your company has paid for the current period.'),
+                ['buttonText' => 'Open FitAccess', 'buttonUrl' => config('app.frontend_url') . '/employee/cards']);
+        }
+
         return response()->json([
-            'message'  => 'Employee ban has been lifted.',
+            'message'  => 'Ban lifted. The employee can use the same card number again.',
             'employee' => $this->employeePayload($employee->fresh()),
         ]);
     }
@@ -473,7 +587,7 @@ class HRController extends Controller
             'email'               => $e->user?->email,
             'phone'               => $e->user?->phone,
             'fan_number'          => $e->fan_number,
-            'card_number'         => $e->card_number,
+            ...self::cardFields($e),
             'package'             => Employee::levelToPackage($e->level ?? 'staff'),
             'level'               => $e->level,
             'job_title'           => $e->job_title,
@@ -483,12 +597,34 @@ class HRController extends Controller
             'can_manage'          => $this->canManage($e),
             'request_note'        => $e->request_note,
             'registration_status' => $e->registration_status ?? 'approved',
+            'admin_approval_status' => $e->admin_approval_status,
             'status'              => $e->accessStatus(),
             'paid_until'          => $e->paid_until?->toDateString(),
             'enrolled_at'         => $e->enrolled_at?->toDateString() ?? $e->created_at->toDateString(),
             'is_banned'           => $e->is_banned,
             'banned_until'        => $e->banned_until?->toIso8601String(),
+            'ban_indefinite'      => $e->isBanIndefinite(),
             'ban_reason'          => $e->ban_reason,
+        ];
+    }
+
+    /**
+     * The company sees an employee's card number only after FitAccess has
+     * issued it to them (admin → company → employee).
+     */
+    private static function cardFields(Employee $e): array
+    {
+        $issued = $e->isCardIssued();
+
+        return [
+            'card_number'    => $issued && $e->card_number ? \App\Support\CardNumber::format($e->card_number) : null,
+            'card_issued'    => $issued,
+            'card_activated' => $e->hasActivatedCard(),
+            // Imported employees create their own account from the invitation email
+            'account_created' => $e->account_created_at !== null,
+            'invited_at'      => $e->invited_at?->toIso8601String(),
+            'invite_expired'  => $e->account_created_at === null && $e->invite_expires_at?->isPast(),
+            'birth_date'      => $e->birth_date?->toDateString(),
         ];
     }
 

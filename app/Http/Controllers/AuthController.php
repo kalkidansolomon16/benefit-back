@@ -122,16 +122,9 @@ class AuthController extends Controller
 
         $user = Auth::user();
 
-        // Check if employee is currently banned
-        if ($user->role === 'employee') {
-            $employee = \App\Models\Employee::where('user_id', $user->id)->first();
-            if ($employee && $employee->banned_until && $employee->banned_until->isFuture()) {
-                Auth::logout();
-                return response()->json([
-                    'message' => 'Your gym access is suspended until ' . $employee->banned_until->toDateString() . '. Please contact your HR team.',
-                ], 403);
-            }
-        }
+        // A banned employee may still sign in, but only to a view-only portal:
+        // the card, check-in, trainings and profile edits stay blocked until the
+        // ban is lifted (EnsureCardActivated, activateCard, check-in all refuse).
 
         // Employees need both company (HR) and admin approval, even if is_active was flipped on
         if ($user->role === 'employee' && $user->is_active) {
@@ -146,7 +139,14 @@ class AuthController extends Controller
             }
         }
 
-        if (!$user->is_active) {
+        // HR-approved employees still waiting for FitAccess's final approval may
+        // sign in to a view-only portal (every action needs an activated card,
+        // and the card can only be activated after admin approval).
+        $viewOnlyEmployee = !$user->is_active
+            && $user->role === 'employee'
+            && (bool) \App\Models\Employee::where('user_id', $user->id)->first()?->isAwaitingAdminApproval();
+
+        if (!$user->is_active && !$viewOnlyEmployee) {
             Auth::logout();
 
             if ($user->role === 'employee') {
@@ -176,53 +176,124 @@ class AuthController extends Controller
     }
 
     /**
-     * Roles that must complete TOTP two-factor authentication to log in.
+     * Roles that must complete the second sign-in step (emailed code).
      */
     private function mfaRequiredRoles(): array
     {
         return array_merge(User::ADMIN_ROLES, self::MFA_EXTRA_ROLES);
     }
 
+    private const LOGIN_CODE_MINUTES = 10;
+    private const LOGIN_CODE_MAX_ATTEMPTS = 5;
+    private const LOGIN_CODE_MAX_SENDS = 5;
+    private const LOGIN_CODE_RESEND_SECONDS = 60;
+
+    /** "ka*****@gmail.com" */
+    private static function maskEmail(string $email): string
+    {
+        [$local, $domain] = array_pad(explode('@', $email, 2), 2, '');
+        $keep = mb_substr($local, 0, min(2, max(1, mb_strlen($local) - 1)));
+
+        return $keep . str_repeat('*', max(3, mb_strlen($local) - mb_strlen($keep))) . '@' . $domain;
+    }
+
+    /** Codes are stored only as an HMAC, never in plain text. */
+    private static function hashLoginCode(string $code): string
+    {
+        return hash_hmac('sha256', $code, (string) config('app.key'));
+    }
+
+    /** Create a fresh 6-digit code for this sign-in attempt and email it. */
+    private function sendLoginCode(User $user, string $mfaToken, int $sends): bool
+    {
+        $code = str_pad((string) random_int(0, 999999), 6, '0', STR_PAD_LEFT);
+
+        try {
+            Mail::to($user->email)->send(new \App\Mail\LoginCodeMail($user->name, $code, self::LOGIN_CODE_MINUTES));
+        } catch (\Throwable $e) {
+            \Illuminate\Support\Facades\Log::error('Login code email failed: ' . $e->getMessage(), ['user_id' => $user->id]);
+            return false;
+        }
+
+        Cache::put("mfa_code:{$mfaToken}", [
+            'hash'     => self::hashLoginCode($code),
+            'attempts' => 0,
+            'sends'    => $sends,
+            'sent_at'  => time(),
+        ], now()->addMinutes(self::LOGIN_CODE_MINUTES));
+
+        return true;
+    }
+
     /**
-     * Password was correct but the account requires MFA before a session
-     * token is issued. The QR code is only shown the first time (until the
-     * user confirms a code); after that the saved secret is reused and the
-     * user just enters the 6-digit code from their authenticator app.
+     * Password was correct but the account needs a second step: a one-time
+     * code is emailed to the account address. (Replaces the authenticator
+     * app / QR code. The response keeps the same fields so existing clients,
+     * including the mobile app, keep working: qr_code and secret are null.)
      */
     private function beginMfaChallenge(User $user): JsonResponse
     {
         $mfaToken = Str::random(64);
-        Cache::put("mfa_pending:{$mfaToken}", $user->id, now()->addMinutes(10));
+        Cache::put("mfa_pending:{$mfaToken}", $user->id, now()->addMinutes(self::LOGIN_CODE_MINUTES));
 
-        // Already enrolled: skip the QR and ask for the code only
-        if ($user->google2fa_enabled && $user->google2fa_secret) {
+        if (!$this->sendLoginCode($user, $mfaToken, 1)) {
+            Cache::forget("mfa_pending:{$mfaToken}");
             return response()->json([
-                'mfa_setup_required' => true,
-                'mfa_enrolled'       => true,
-                'mfa_token'          => $mfaToken,
-                'qr_code'            => null,
-                'secret'             => null,
-                'message'            => 'Enter the 6-digit code from your authenticator app to finish signing in.',
-            ]);
+                'message' => 'We could not send your sign-in code right now. Please try again in a few minutes.',
+            ], 503);
         }
 
-        $tfa    = app(TwoFactorService::class);
-        $secret = $tfa->generateSecretKey();
-        $user->forceFill(['google2fa_secret' => $secret])->save();
+        $masked = self::maskEmail($user->email);
 
         return response()->json([
             'mfa_setup_required' => true,
-            'mfa_enrolled'       => false,
+            'mfa_enrolled'       => true,
+            'mfa_method'         => 'email',
+            'mfa_sent_to'        => $masked,
+            'mfa_resend_after'   => self::LOGIN_CODE_RESEND_SECONDS,
             'mfa_token'          => $mfaToken,
-            'qr_code'            => $tfa->getQrCodeDataUri($user->email, $secret),
-            'secret'             => $secret,
-            'message'            => 'Two-factor authentication is required for your role. Scan the QR code with an authenticator app (Google Authenticator, Authy, etc.), then enter the 6-digit code to finish signing in.',
+            'qr_code'            => null,
+            'secret'             => null,
+            'message'            => "We sent a 6-digit code to {$masked}. Enter it to finish signing in.",
+        ]);
+    }
+
+    /** Send a new code for the same sign-in attempt (rate limited). */
+    public function mfaResend(Request $request): JsonResponse
+    {
+        $request->validate(['mfa_token' => 'required|string']);
+        $mfaToken = (string) $request->input('mfa_token');
+
+        $userId = Cache::get("mfa_pending:{$mfaToken}");
+        $user   = $userId ? User::find($userId) : null;
+        $state  = Cache::get("mfa_code:{$mfaToken}");
+        if (!$user || !$state) {
+            return response()->json(['message' => 'This sign-in has expired. Please sign in again.'], 422);
+        }
+
+        $wait = self::LOGIN_CODE_RESEND_SECONDS - (time() - (int) $state['sent_at']);
+        if ($wait > 0) {
+            return response()->json(['message' => "Please wait {$wait} seconds before asking for a new code.", 'retry_after' => $wait], 429);
+        }
+        if ((int) $state['sends'] >= self::LOGIN_CODE_MAX_SENDS) {
+            return response()->json(['message' => 'Too many codes requested. Please sign in again.'], 429);
+        }
+
+        if (!$this->sendLoginCode($user, $mfaToken, (int) $state['sends'] + 1)) {
+            return response()->json(['message' => 'We could not send your sign-in code right now. Please try again in a few minutes.'], 503);
+        }
+        // Keep the sign-in attempt alive as long as the new code
+        Cache::put("mfa_pending:{$mfaToken}", $user->id, now()->addMinutes(self::LOGIN_CODE_MINUTES));
+
+        return response()->json([
+            'message'          => 'A new code has been sent to ' . self::maskEmail($user->email) . '.',
+            'mfa_resend_after' => self::LOGIN_CODE_RESEND_SECONDS,
         ]);
     }
 
     /**
-     * Step 2 of login: verify the code (against the new secret on first
-     * setup, or the saved one afterwards) and issue the real session.
+     * Step 2 of login: check the emailed code and issue the real session.
+     * (Endpoint name kept for existing clients.)
      */
     public function mfaSetupConfirm(Request $request): JsonResponse
     {
@@ -231,21 +302,33 @@ class AuthController extends Controller
             'code'      => 'required|digits:6',
         ]);
 
-        $pendingKey = "mfa_pending:{$request->input('mfa_token')}";
+        $mfaToken   = (string) $request->input('mfa_token');
+        $pendingKey = "mfa_pending:{$mfaToken}";
+        $codeKey    = "mfa_code:{$mfaToken}";
         $userId     = Cache::get($pendingKey);
         $user       = $userId ? User::find($userId) : null;
+        $state      = Cache::get($codeKey);
 
-        if (!$user || !$user->google2fa_secret) {
-            return response()->json(['message' => 'This login session has expired. Please sign in again.'], 422);
+        if (!$user || !$state) {
+            return response()->json(['message' => 'This sign-in has expired. Please sign in again.'], 422);
         }
 
-        $tfa = app(TwoFactorService::class);
-        if (!$tfa->verifyKey($user->google2fa_secret, $request->input('code'))) {
-            return response()->json(['message' => 'Invalid authentication code. Please try again.'], 422);
+        if (!hash_equals($state['hash'], self::hashLoginCode((string) $request->input('code')))) {
+            $state['attempts'] = (int) $state['attempts'] + 1;
+            if ($state['attempts'] >= self::LOGIN_CODE_MAX_ATTEMPTS) {
+                Cache::forget($codeKey);
+                Cache::forget($pendingKey);
+                return response()->json(['message' => 'Too many wrong codes. Please sign in again.'], 422);
+            }
+            Cache::put($codeKey, $state, now()->addMinutes(self::LOGIN_CODE_MINUTES));
+            $left = self::LOGIN_CODE_MAX_ATTEMPTS - $state['attempts'];
+
+            return response()->json([
+                'message' => "That code is not correct. You have {$left} " . ($left === 1 ? 'try' : 'tries') . ' left.',
+            ], 422);
         }
 
-        $user->forceFill(['google2fa_enabled' => true])->save();
-
+        Cache::forget($codeKey);
         Cache::forget($pendingKey);
 
         return $this->respondWithSession($request, $user);
@@ -366,7 +449,7 @@ class AuthController extends Controller
             'company_name'     => 'required|string|max:255',
             'industry'         => 'required|string|max:100',
             'company_size'     => 'nullable|string|max:50',
-            'tin'              => 'required|string|max:50',
+            'tin'              => 'nullable|string|max:50',
             'contact_name'     => 'required|string|max:255',
             'job_title'        => 'nullable|string|max:255',
             'email'            => 'required|email|max:255|unique:users,email|unique:companies,contact_email',
@@ -397,7 +480,7 @@ class AuthController extends Controller
                 'company_name'             => $request->company_name,
                 'industry'                 => $this->mapIndustry($request->industry),
                 'company_size'             => $request->company_size,
-                'tin_number'               => trim($request->tin),
+                'tin_number'               => trim((string) $request->tin) ?: null,
                 'preferred_payment_method' => $request->preferred_payment_method,
                 'contact_name'             => $request->contact_name,
                 'job_title'                => $request->job_title,
@@ -426,7 +509,7 @@ class AuthController extends Controller
                 'Company'        => $application->company_name,
                 'Industry'       => $application->industry,
                 'Company size'   => $application->company_size,
-                'TIN'            => $application->tin_number,
+                'TIN'            => $application->tin_number ?: 'Not provided',
                 'Contact person' => trim($application->contact_name . ($application->job_title ? " ({$application->job_title})" : '')),
                 'Email'          => $application->contact_email,
                 'Phone'          => $application->contact_phone,
@@ -450,6 +533,23 @@ class AuthController extends Controller
      */
     public function registerEmployee(Request $request): JsonResponse
     {
+        // Already registered by their company (Excel import) but no account yet:
+        // point them to "Create your account" instead of a plain "already registered".
+        $invited = \App\Models\Employee::whereNull('account_created_at')
+            ->whereHas('user', fn ($q) => $q->where('email', strtolower(trim((string) $request->input('email')))))
+            ->first();
+        if ($invited) {
+            $msg = 'Your company has already registered you for FitAccess. You do not need to fill in this form: '
+                . 'use "Create my account" in the e-mail we sent you, or create it on the page linked below.';
+
+            return response()->json([
+                'message' => $msg,
+                'code'    => 'already_invited',
+                'join_url' => '/join?email=' . rawurlencode(strtolower(trim((string) $request->input('email')))),
+                'errors'  => ['email' => [$msg]],
+            ], 422);
+        }
+
         $request->validate([
             'first_name'      => 'required|string|max:100',
             'fathers_name'    => 'required|string|max:100',
@@ -532,7 +632,7 @@ class AuthController extends Controller
             'contact_person'   => 'required|string|max:255',
             'contact_phone'    => 'required|string|max:20',
             'contact_email'    => 'required|email|max:255|unique:users,email',
-            'tin_number'       => 'required|string|max:50',
+            'tin_number'       => 'nullable|string|max:50',
             'website'          => 'nullable|url:http,https|max:255',
             'has_permits'             => 'required|boolean',
             'has_certified_equipment' => 'required|boolean',
@@ -590,7 +690,7 @@ class AuthController extends Controller
                 'contact_person'          => $request->contact_person,
                 'contact_phone'           => $request->contact_phone,
                 'contact_email'           => strtolower(trim($request->contact_email)),
-                'tin_number'              => trim($request->tin_number),
+                'tin_number'              => trim((string) $request->tin_number) ?: null,
                 'website'                 => $request->filled('website') ? trim($request->website) : null,
                 'has_permits'             => $request->boolean('has_permits'),
                 'has_certified_equipment' => $request->boolean('has_certified_equipment'),
@@ -631,7 +731,7 @@ class AuthController extends Controller
             array_filter([
                 'Facility'       => $partnerApplication->facility_name,
                 'Categories'     => implode(', ', $categories),
-                'TIN'            => $partnerApplication->tin_number,
+                'TIN'            => $partnerApplication->tin_number ?: 'Not provided',
                 'Website'        => $partnerApplication->website,
                 'Permits'             => $partnerApplication->has_permits ? 'Yes' : 'No',
                 'Certified equipment' => $partnerApplication->has_certified_equipment ? 'Yes' : 'No',

@@ -65,7 +65,7 @@ class CompanyController extends Controller
         $request->validate([
             'name'          => 'required|string|max:255',
             'industry'      => 'required|string|max:100',
-            'tier'          => 'required|in:basic,basic_plus,platinum',
+            'tier'          => 'nullable|in:basic,basic_plus,platinum',   // no company-wide plan; plans are per employee
             'contact_person'=> 'required|string|max:255',
             'contact_email' => 'required|email|unique:companies,contact_email|unique:users,email',
             'contact_phone' => 'required|string|max:20',
@@ -90,7 +90,7 @@ class CompanyController extends Controller
                 $companyData = [
                     'name'                     => $request->name,
                     'industry'                 => $request->industry,
-                    'tier'                     => $request->tier,
+                    'tier'                     => $request->tier ?: 'basic',
                     'contact_person'           => $request->contact_person,
                     'contact_email'            => $request->contact_email,
                     'contact_phone'            => $request->contact_phone,
