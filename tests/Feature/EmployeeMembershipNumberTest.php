@@ -89,12 +89,12 @@ class EmployeeMembershipNumberTest extends TestCase
             ->assertStatus(429)->assertJsonPath('code', 'too_many');
     }
 
-    public function test_accounts_without_a_company_membership_are_told_so(): void
+    public function test_accounts_without_a_company_membership_get_wrong_number_for_unknown_numbers(): void
     {
         $member = User::forceCreate(['name' => 'M', 'email' => 'm@num.test', 'password' => Hash::make('x'), 'role' => 'member', 'is_active' => true]);
         Sanctum::actingAs($member);
         $this->postJson('/api/v1/mobile/membership/activate', ['member_number' => '1234 5678 9015'])
-            ->assertUnprocessable()->assertJsonPath('code', 'no_membership');
+            ->assertUnprocessable()->assertJsonPath('code', 'wrong_number');
     }
 
     private function buyAndPay(): void

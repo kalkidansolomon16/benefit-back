@@ -218,7 +218,9 @@ class MobileController extends Controller
                 // Whether check-in codes need a verified photo (REQUIRE_VERIFICATION).
                 'verification_required' => (bool) config('fitaccess.require_verification'),
                 // Employees enter their 12-digit number once (Home) to activate the card.
-                'card_activated' => $user->employee ? $user->employee->card_activated_at !== null : true,
+                // Until then the app shows only "Activate your membership" (accounts
+                // without a company membership included).
+                'card_activated' => $user->employee?->card_activated_at !== null,
                 'verification_rejection_reason' => $latestVerification?->status === 'rejected' ? $latestVerification->rejection_reason : null,
                 'plan_name'      => $employee?->activeMembership?->plan?->name,
                 'plan_tier'      => $employee?->activeMembership?->plan?->tier,

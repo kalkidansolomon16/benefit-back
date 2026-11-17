@@ -183,6 +183,8 @@ Route::prefix('v1')->group(function () {
             Route::get('checkins',               [\App\Http\Controllers\MobileController::class, 'checkins']);
             // v2 identity verification (selfie, private storage)
             Route::post('membership/activate',   [\App\Http\Controllers\MembershipActivationController::class, 'activate'])->middleware('throttle:10,1');
+            Route::post('membership/activate/confirm', [\App\Http\Controllers\MembershipActivationController::class, 'confirm'])->middleware('throttle:10,1');
+            Route::post('membership/activate/resend',  [\App\Http\Controllers\MembershipActivationController::class, 'resend'])->middleware('throttle:3,10');
             Route::get('verification',           [\App\Http\Controllers\VerificationController::class, 'status']);
             Route::post('verification',          [\App\Http\Controllers\VerificationController::class, 'submit'])->middleware('throttle:6,60');
             Route::get('verification/photo',     [\App\Http\Controllers\VerificationController::class, 'myPhoto']);
