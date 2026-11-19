@@ -29,6 +29,68 @@ class EmployeePortalController extends Controller
         return $employee;
     }
 
+    /**
+     * Full check-in history with the details of each visit: date and time in
+     * and out, duration, the gym and branch, its address and contact, and how
+     * the visit was recorded.
+     */
+    public function checkins(): JsonResponse
+    {
+        $employee = Employee::where('user_id', auth()->id())->first();
+        if (!$employee) {
+            abort(403, 'No employee record linked to this account.');
+        }
+
+        $methods = ['card' => 'FitAccess card', 'fan_number' => 'ID number', 'facial' => 'Face check'];
+        $tz      = config('app.timezone');
+
+        $rows = \App\Models\Checkin::where('employee_id', $employee->id)
+            ->with('gym.parent:id,name')
+            ->orderByDesc('checked_in_at')
+            ->get()
+            ->map(function ($c) use ($methods, $tz) {
+                $g   = $c->gym;
+                $in  = $c->checked_in_at?->copy()->setTimezone($tz);
+                $out = $c->checked_out_at?->copy()->setTimezone($tz);
+
+                return [
+                    'id'              => $c->id,
+                    'gym_id'          => $g?->id,
+                    'gym_name'        => $g ? ($g->parent?->name ?? $g->name) : 'Unknown gym',
+                    'branch_name'     => $g ? ($g->branch_name ?: ($g->parent ? $g->name : null)) : null,
+                    'gym_tier'        => $g?->tier ?? 'basic',
+                    'gym_sub_city'    => $g?->sub_city ?? '',
+                    'gym_city'        => $g?->city,
+                    'gym_address'     => $g?->address,
+                    'gym_phone'       => $g?->contact_phone,
+                    'latitude'        => $g?->latitude !== null ? (float) $g->latitude : null,
+                    'longitude'       => $g?->longitude !== null ? (float) $g->longitude : null,
+                    'checked_in_at'   => $in?->format('Y-m-d H:i'),
+                    'checked_out_at'  => $out?->format('Y-m-d H:i'),
+                    'date'            => $in?->format('d/m/Y'),
+                    'weekday'         => $in?->format('l'),
+                    'time_in'         => $in?->format('H:i'),
+                    'time_out'        => $out?->format('H:i'),
+                    'duration_min'    => $c->duration_minutes,
+                    'status'          => $c->checked_out_at ? 'completed' : ($in && $in->isToday() ? 'in_gym' : 'no_checkout'),
+                    'method'          => $c->method,
+                    'method_label'    => $methods[$c->method] ?? ucfirst(str_replace('_', ' ', (string) $c->method)),
+                    'recorded_by'     => $c->recorded_by,
+                ];
+            })->values();
+
+        $now = Carbon::now();
+        return response()->json([
+            'checkins' => $rows,
+            'stats'    => [
+                'total_checkins'      => $rows->count(),
+                'this_month_checkins' => $rows->filter(fn ($r) => $r['checked_in_at'] && Carbon::parse($r['checked_in_at'])->isSameMonth($now))->count(),
+                'this_week_checkins'  => $rows->filter(fn ($r) => $r['checked_in_at'] && Carbon::parse($r['checked_in_at'])->isSameWeek($now))->count(),
+                'gyms_visited'        => $rows->pluck('gym_id')->filter()->unique()->count(),
+            ],
+        ]);
+    }
+
     public function dashboard(): JsonResponse
     {
         $employee = $this->getMyEmployee();

@@ -248,6 +248,7 @@ Route::prefix('v1')->group(function () {
         // ── Employee portal (web) ──────────────────────────────────────
         Route::prefix('employee')->middleware('area:employee')->group(function () {
             Route::get('dashboard',     [EmployeePortalController::class, 'dashboard']);
+            Route::get('checkins',      [EmployeePortalController::class, 'checkins']);
             Route::post('activate-card', [EmployeePortalController::class, 'activateCard'])->middleware('throttle:10,1');
             Route::get('news',                         [EmployeePortalController::class, 'news']);
             Route::get('news/{newsPost}',              [EmployeePortalController::class, 'newsShow']);

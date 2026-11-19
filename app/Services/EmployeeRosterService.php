@@ -138,10 +138,10 @@ class EmployeeRosterService
             if (!$phone) $errors[] = 'Phone must be an Ethiopian mobile number, e.g. +251911234567 or 0911234567.';
 
             $birthDate = $this->date($birth);
-            if (!$birthDate) $errors[] = 'Birth date is missing or not in YYYY-MM-DD format.';
+            if (!$birthDate) $errors[] = 'Birth date is missing or not in DD/MM/YYYY format (e.g. 14/05/1992).';
             elseif ($birthDate->gt(now()->subYears(16)) || $birthDate->lt(now()->subYears(100))) $errors[] = 'Birth date does not look right.';
             $joinedDate = $joined !== '' ? $this->date($joined) : null;
-            if ($joined !== '' && !$joinedDate) $errors[] = 'Date joined company is not in YYYY-MM-DD format.';
+            if ($joined !== '' && !$joinedDate) $errors[] = 'Date joined company is not in DD/MM/YYYY format (e.g. 06/01/2025).';
 
             $planRef = strtolower(trim($row['plan'] ?? ''));
             $plan = $plans->first(fn ($p) => strtolower($p->name) === $planRef || strtolower($p->tier) === $planRef);
@@ -287,6 +287,9 @@ class EmployeeRosterService
         }
         if ($k === 'company_branch_id') {
             return CompanyBranch::find($v)?->name ?? 'Head office';
+        }
+        if ($k === 'birth_date' && preg_match('/^\d{4}-\d{2}-\d{2}$/', (string) $v)) {
+            return Carbon::parse($v)->format('d/m/Y');
         }
 
         return (string) $v;

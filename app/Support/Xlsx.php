@@ -121,13 +121,17 @@ class Xlsx
         return trim($h, '_');
     }
 
-    /** Excel serial (e.g. 45231) or a typed date → Y-m-d; anything else unchanged */
+    /**
+     * Excel serial (e.g. 45231) or a typed date → Y-m-d; anything else unchanged.
+     * Typed dates are read day first (DD/MM/YYYY), the format the template asks for.
+     */
     public static function normalizeDate(string $v): string
     {
         if (preg_match('/^\d{4,6}(\.\d+)?$/', $v)) {
             return Carbon::create(1899, 12, 30)->addDays((int) floor((float) $v))->toDateString();
         }
-        foreach (['Y-m-d', 'd/m/Y', 'd-m-Y', 'd.m.Y', 'm/d/Y', 'Y/m/d'] as $fmt) {
+        $v = trim($v);
+        foreach (['d/m/Y', 'j/n/Y', 'd-m-Y', 'j-n-Y', 'd.m.Y', 'j.n.Y', 'Y-m-d', 'Y/m/d'] as $fmt) {
             try {
                 $d = Carbon::createFromFormat('!' . $fmt, $v);
                 if ($d && $d->format($fmt) === $v) {
