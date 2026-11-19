@@ -22,7 +22,7 @@ class OnboardingDocuments
         'First name *'                 => 'first_name',
         'Middle name *'                => 'middle_name',
         'Last name *'                  => 'last_name',
-        'Birth date * (YYYY-MM-DD)'    => 'birth_date',
+        'Birth date * (DD/MM/YYYY)'    => 'birth_date',
         'FAN number *'                 => 'fan_number',
         'Email *'                      => 'email',
         'Phone *'                      => 'phone',
@@ -30,7 +30,7 @@ class OnboardingDocuments
         'Job title'                    => 'job_title',
         'Department'                   => 'department',
         'Branch'                       => 'branch',
-        'Date joined company (YYYY-MM-DD)' => 'date_joined_company',
+        'Date joined company (DD/MM/YYYY)' => 'date_joined_company',
     ];
 
     /* ── Excel template ──────────────────────────────────────── */
@@ -62,7 +62,7 @@ class OnboardingDocuments
         $instructions = [
             ['How to fill in this file'],
             ['ℹ Add one row per employee who signed the FitAccess contract, on the "Employees" sheet. Do not change the header row.'],
-            ['ℹ Required columns are marked with *. Birth date and dates use the format YYYY-MM-DD (e.g. 1992-05-14).'],
+            ['ℹ Required columns are marked with *. Birth date and other dates use the format DD/MM/YYYY: day/month/year (e.g. 14/05/1992 for 14 May 1992).'],
             ['ℹ Email and phone must be different for every employee. They are used to invite the employee to create their account.'],
             ['ℹ Pick the Plan (and Branch, if you have branches) from the drop-down list.'],
             ['ℹ You can import this file again next period: employees already registered are not duplicated, only their changed details are updated.'],
@@ -80,8 +80,8 @@ class OnboardingDocuments
         $instructions[] = [''];
         $instructions[] = ['Example row (do not copy into the Employees sheet)'];
         $instructions[] = $headers;
-        $instructions[] = ['Abebe', 'Girma', 'Haile', '1992-05-14', '1234567890123', 'abebe.girma@example.com', '+251911234567',
-            $plans[0]->name ?? 'Fit Basic', 'Accountant', 'Finance', 'Head office', now()->toDateString()];
+        $instructions[] = ['Abebe', 'Girma', 'Haile', '14/05/1992', '1234567890123', 'abebe.girma@example.com', '+251911234567',
+            $plans[0]->name ?? 'Fit Basic', 'Accountant', 'Finance', 'Head office', now()->format('d/m/Y')];
 
         return Xlsx::build([
             [
